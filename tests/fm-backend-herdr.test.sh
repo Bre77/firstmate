@@ -751,6 +751,23 @@ EOF
   pass "herdr repeated spawn/teardown: one persistent firstmate workspace reused, zero orphans, default tab pruned, create ran once"
 }
 
+# test_no_jq_reserved_keyword_arg_names: regression guard for the
+# workspace-leak root cause (a jq `--arg`/`--argjson` named after a jq
+# reserved keyword, e.g. `label`, is a compile error on jq <= 1.6; this
+# adapter discards jq's stderr, so the error silently becomes an empty
+# result instead of a visible failure). Greps every bin/ script for the
+# pattern so a future filter reintroducing it fails loudly here instead of
+# silently misbehaving on an older jq.
+test_no_jq_reserved_keyword_arg_names() {
+  local reserved='and|as|catch|def|elif|else|end|foreach|if|import|include|label|module|or|reduce|then|try'
+  local hits
+  hits=$(grep -rnE -- "--arg(json)?[[:space:]]+($reserved)\b" "$ROOT/bin" 2>/dev/null)
+  if [ -n "$hits" ]; then
+    fail "a jq --arg/--argjson variable is named after a jq reserved keyword (compile error on jq <= 1.6, silently swallowed by 2>/dev/null):"$'\n'"$hits"
+  fi
+  pass "no bin/ jq filter names a --arg/--argjson variable after a jq reserved keyword"
+}
+
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
 
@@ -769,6 +786,7 @@ test_container_ensure_creates_with_no_focus_flag
 test_container_ensure_uses_secondmate_home_label
 test_workspace_ensure_prunes_default_tab
 test_repeated_cycles_reuse_one_workspace_no_orphans
+test_no_jq_reserved_keyword_arg_names
 test_create_task_refuses_duplicate_label
 test_create_task_creates_and_parses_ids
 test_create_task_creates_with_no_focus_flag
