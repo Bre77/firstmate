@@ -181,11 +181,15 @@ fm_backend_herdr_workspace_find() {  # <session>
 # fm_backend_herdr_workspace_prune_default_tabs: close the tab herdr
 # auto-creates inside a freshly created workspace (label "1", never an
 # fm-<id> task tab), so the persistent "firstmate" workspace holds only real
-# task tabs - the documented one-tab-per-task shape. Runs only on the create
-# path (find already reuses an existing workspace), when the ONLY tab present
-# is that auto-created default, so filtering to non-fm- tabs never touches a
-# task tab. Best-effort: a failure here never fails the spawn, mirroring the
-# fm_backend_herdr_kill `|| true` contract.
+# task tabs - the documented one-tab-per-task shape. Best-effort: a failure
+# here never fails the caller, mirroring the fm_backend_herdr_kill `|| true`
+# contract.
+#
+# Verified real-herdr behavior (not modeled by the fake-CLI unit tests):
+# closing a workspace's LAST remaining tab deletes the whole workspace, not
+# just the tab. So this must never run while the auto-created default tab is
+# still the ONLY tab - callers only invoke it once at least one other (real
+# task) tab exists alongside it, never right after workspace creation.
 fm_backend_herdr_workspace_prune_default_tabs() {  # <session> <workspace_id>
   local session=$1 wsid=$2 tabs tab_id pane_id
   tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 0
@@ -218,8 +222,11 @@ fm_backend_herdr_workspace_ensure() {  # <session> <cwd>
   wsid=$(printf '%s' "$out" | jq -r '.result.workspace.workspace_id // empty' 2>/dev/null)
   [ -n "$wsid" ] || return 1
   # Herdr seeds a new workspace with one auto-created default tab firstmate
-  # never uses; drop it so only task tabs remain. Best-effort.
-  fm_backend_herdr_workspace_prune_default_tabs "$session" "$wsid"
+  # never uses. It is NOT pruned here: at this instant it is the workspace's
+  # ONLY tab, and closing a workspace's last tab deletes the workspace itself
+  # (verified against the real herdr binary) - pruning here would destroy the
+  # workspace we just created. fm_backend_herdr_create_task prunes it instead,
+  # once the first real task tab exists alongside it.
   printf '%s' "$wsid"
 }
 
@@ -241,9 +248,13 @@ fm_backend_herdr_container_ensure() {  # <cwd-for-a-fresh-workspace>
 # label), so the duplicate check is ours, mirroring tmux's manual check.
 # --no-focus: verified tab create never focuses by default regardless of
 # sibling tabs, so this is defense in depth rather than a behavior change.
+# If <container>'s workspace was JUST created (its only tab beforehand was
+# herdr's auto-created default, label "1"), prune that default tab now that
+# this call has added a real tab alongside it - see
+# fm_backend_herdr_workspace_ensure for why pruning cannot happen any earlier.
 # Echoes "<tab_id> <pane_id>" on success.
 fm_backend_herdr_create_task() {  # <container> <label> <cwd>
-  local container=$1 label=$2 cwd=$3 session wsid list dup out tab_id pane_id
+  local container=$1 label=$2 cwd=$3 session wsid list dup out tab_id pane_id only_default
   session=${container%%:*}
   wsid=${container#*:}
   list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
@@ -252,6 +263,8 @@ fm_backend_herdr_create_task() {  # <container> <label> <cwd>
     echo "error: herdr tab '$label' already exists in workspace $wsid (session $session)" >&2
     return 1
   fi
+  only_default=$(printf '%s' "$list" | jq -r \
+    'if (.result.tabs? // [] | length) == 1 and .result.tabs[0].label == "1" then "1" else empty end' 2>/dev/null)
   out=$(fm_backend_herdr_cli "$session" tab create --workspace "$wsid" --cwd "$cwd" --label "$label" --no-focus 2>/dev/null) || return 1
   tab_id=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
   pane_id=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
@@ -259,6 +272,7 @@ fm_backend_herdr_create_task() {  # <container> <label> <cwd>
     echo "error: could not parse tab/pane id from herdr tab create output" >&2
     return 1
   fi
+  [ -z "$only_default" ] || fm_backend_herdr_workspace_prune_default_tabs "$session" "$wsid"
   printf '%s %s' "$tab_id" "$pane_id"
 }
 

@@ -231,6 +231,14 @@ pass "real herdr: kill removes the pane and is idempotent/best-effort"
 
 # --- list_live (label-based recovery discovery) ------------------------------
 
+# Real firstmate spawns always re-run container_ensure immediately before
+# create_task (bin/fm-spawn.sh), never reusing a container reference from an
+# earlier spawn. This test must do the same: the kill above closed the only
+# remaining tab in $CONTAINER's workspace, and closing a workspace's last tab
+# deletes the workspace itself (verified real-herdr behavior), so the stale
+# $CONTAINER from container_ensure at test start no longer names a live
+# workspace.
+CONTAINER=$(fm_backend_herdr_container_ensure /tmp) || fail "container_ensure for the second task failed"
 LABEL2="fm-smoke2"
 TASK_IDS2=$(fm_backend_herdr_create_task "$CONTAINER" "$LABEL2" /tmp) || fail "second create_task failed"
 read -r _TAB_ID2 PANE_ID2 <<EOF

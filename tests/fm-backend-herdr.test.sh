@@ -680,19 +680,34 @@ SH
 # --- workspace lifecycle: reuse, no orphans, default-tab pruning -------------
 
 test_workspace_ensure_prunes_default_tab() {
-  local dir log state fb container wsid defcount
+  local dir log state fb container wsid ids pane tabcount
   dir="$TMP_ROOT/prune-default"; mkdir -p "$dir"; log="$dir/log"; state="$dir/state.json"; : > "$log"
   fb=$(make_herdr_statefake "$dir")
   container=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /proj' "$ROOT" ) \
     || fail "container_ensure failed against the stateful fake"
   wsid=${container#*:}
-  # herdr seeds a fresh workspace with one auto-created default tab (label "1");
-  # the adapter must close it so the workspace holds only real task tabs.
-  defcount=$(jq -r --arg w "$wsid" '[.tabs[]|select(.workspace_id==$w)]|length' "$state")
-  [ "$defcount" = 0 ] || fail "the auto-created default tab should be pruned on workspace creation, $defcount tab(s) remain: $(jq -c '.tabs' "$state")"
-  assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''close' "workspace_ensure did not close the default tab's pane"
-  pass "fm_backend_herdr_workspace_ensure: prunes herdr's auto-created default tab so only task tabs remain"
+  # herdr seeds a fresh workspace with one auto-created default tab (label "1")
+  # and closing a workspace's LAST tab deletes the whole workspace on real
+  # herdr, so the adapter must not prune it until a real task tab exists
+  # alongside it - verify it is still present right after container_ensure.
+  tabcount=$(jq -r --arg w "$wsid" '[.tabs[]|select(.workspace_id==$w)]|length' "$state")
+  [ "$tabcount" = 1 ] || fail "expected the untouched default tab to remain after container_ensure alone, got $tabcount tab(s): $(jq -c '.tabs' "$state")"
+  ids=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task "$1" "$2" /proj' "$ROOT" "$container" "fm-prunetest" ) \
+    || fail "create_task failed against the stateful fake"
+  read -r _ pane <<EOF
+$ids
+EOF
+  [ -n "$pane" ] || fail "create_task returned no pane id"
+  # Once the real task tab exists, create_task must prune the default tab so
+  # only the real task tab remains.
+  tabcount=$(jq -r --arg w "$wsid" '[.tabs[]|select(.workspace_id==$w)]|length' "$state")
+  [ "$tabcount" = 1 ] || fail "the auto-created default tab should be pruned once a real task tab exists, $tabcount tab(s) remain: $(jq -c '.tabs' "$state")"
+  jq -r --arg w "$wsid" '[.tabs[]|select(.workspace_id==$w)][0].label' "$state" | grep -qx 'fm-prunetest' \
+    || fail "the surviving tab should be the real task tab, not the default: $(jq -c '.tabs' "$state")"
+  assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''close' "create_task did not close the default tab's pane"
+  pass "fm_backend_herdr_create_task: prunes herdr's auto-created default tab once the first real task tab exists"
 }
 
 test_repeated_cycles_reuse_one_workspace_no_orphans() {
