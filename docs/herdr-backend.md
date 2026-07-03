@@ -91,6 +91,37 @@ If an older live workspace is still labeled `firstmate-<secondmate-id>`, rename 
 Tab-per-task (within each home's own workspace) still wins on the human-watching axis for the reason P2 originally found: attaching once shows every one of that home's tasks as a tab in one tab bar, switchable with `ctrl+b <n>`, matching how a captain already watches a tmux-backed fleet.
 Workspace-per-task - tried against the real binary in P2 and again considered here - would still only show one task's workspace at a time by default, requiring a separate top-level "space" switch to see the rest of even a single home's fleet; that tradeoff is unchanged by the per-home refinement and workspace-per-task remains rejected.
 
+## Workspace lifecycle: one persistent `firstmate` workspace, reused
+
+The `firstmate` workspace is created once per session and then reused by every subsequent spawn, exactly like tmux's session: `fm_backend_herdr_workspace_ensure` calls `fm_backend_herdr_workspace_find` first and creates a workspace only when no `firstmate`-labelled one exists.
+Teardown (`fm_backend_herdr_kill`) closes only the task's pane/tab; it never removes the workspace, so the workspace persists across the whole session and repeated spawn/teardown cycles never accumulate workspaces.
+
+### The workspace-leak bug (fixed) and its root cause
+
+An earlier version leaked one orphaned `firstmate` workspace per crewmate: every spawn minted a fresh workspace instead of reusing the existing one, so `herdr workspace list` filled up with many `label=firstmate` workspaces, most belonging to already-torn-down tasks.
+
+The root cause was a `jq` reserved-keyword collision, not a logic error in the find-or-create flow.
+`label` is a reserved keyword in `jq` (used by `label $out | ... break $out`), so a filter written as `jq --arg label "$X" '... select(.label == $label) ...'` is a **compile error**, not a match.
+`fm_backend_herdr_workspace_find` discarded `jq`'s stderr (`2>/dev/null`), so that error surfaced as empty output: the find silently returned nothing on every call, `workspace_ensure` always took the create path, and a new `firstmate` workspace was minted per spawn.
+The fix renames the `jq` variable to `$want` (a non-keyword) in the three affected filters - `fm_backend_herdr_workspace_find`, the `fm_backend_herdr_create_task` duplicate-tab check, and `fm_backend_herdr_resolve_bare_selector`.
+The same collision had also silently disabled the create-task duplicate-label check and the bare-selector tab lookup; both work again with the rename.
+
+Guard for future filters in this adapter: never name a `jq --arg` after a `jq` keyword (`label`, `and`, `or`, `not`, `if`, `then`, `else`, `end`, `reduce`, `foreach`, `import`, `def`, `as`, `__loc__`).
+Prefer a distinct name like `$want`.
+
+### The stray auto-created default tab
+
+`herdr workspace create` seeds the new workspace with one auto-created default tab (label `1`) that firstmate never uses.
+Without handling it, that tab lingered alongside the real `fm-<id>` task tab.
+`fm_backend_herdr_workspace_ensure` now prunes it right after creating the workspace (`fm_backend_herdr_workspace_prune_default_tabs`, best-effort), closing every non-`fm-` tab in the freshly created workspace - at that instant the default tab is the only tab present, so real task tabs are never at risk.
+Because reuse skips the create path, pruning runs at most once per session.
+
+### Anomaly: a workspace labelled with a project name
+
+A workspace whose label is a project name (e.g. `python-teslemetry-stream`) rather than `firstmate` is **not** created by this adapter.
+Firstmate's adapter always creates its workspace with the fixed `--label firstmate` (`FM_BACKEND_HERDR_WORKSPACE_LABEL`) and never derives a label from the project.
+Such a workspace originates outside the adapter - herdr's own default/auto-created workspace for a session, or manual/agent activity - so firstmate leaves it untouched (`fm_backend_herdr_workspace_find` and `fm_backend_herdr_list_live` match only the `firstmate` label and `fm-` tab labels respectively, so a project-labelled workspace is neither reused nor torn down by firstmate).
+
 ## Target string and meta fields
 
 A herdr task's `window=` meta field holds `<herdr-session>:<pane-id>`, for example `default:w1:p2`.
@@ -118,7 +149,8 @@ Herdr tasks additionally record:
 | Send key | `herdr pane send-keys <pane> <key>` | Verified names: `enter`, `escape` (alias `esc`), `ctrl+c` (aliases `C-c`, `c-c`). `ctrl+c` verified to interrupt a running foreground process immediately. |
 | Bounded capture | `herdr pane read <pane> --source recent --lines N` | See "Verified bug" below - N is never passed through directly. |
 | Busy state | `herdr agent get <pane>` -> `.result.agent.agent_status` | Verified live against an interactive `claude` session: reports `working` while generating, `done` once idle. Mapped: `working` -> busy; `idle`/`done` -> idle; `blocked` -> idle (surfaced like a stale pane, not suppressed as busy - a blocked agent is stuck waiting on the human, not grinding); anything else -> unknown (the cue for the shared tail-regex fallback). |
-| Kill | `herdr pane close <pane>` | Closing a tab's only (root) pane also closes the tab - no separate tab-close call needed for this adapter's one-pane-per-tab shape. Best-effort: closing an already-closed pane exits non-zero, matching tmux's `kill-window \|\| true` contract. |
+| Kill | `herdr pane close <pane>` | Closing a tab's only (root) pane also closes the tab - no separate tab-close call needed for this adapter's one-pane-per-tab shape. Best-effort: closing an already-closed pane exits non-zero, matching tmux's `kill-window \|\| true` contract. Teardown removes only the task's pane/tab; the `firstmate` workspace is persistent (like tmux's session) and is NOT removed - see "Workspace lifecycle" above. |
+| Default-tab prune (workspace create only) | `herdr tab list --workspace <id>`, then `herdr pane close <pane>` on each non-`fm-` tab | `herdr workspace create` seeds the new workspace with one auto-created default tab (label `1`) firstmate never uses. The adapter closes it right after creating the workspace so only real task tabs remain. Best-effort; runs on the create path only (reuse never re-prunes). |
 | Recovery / list-live | `herdr tab list --workspace <id>`, filter labels starting with `fm-` | Label-based, never trusts a stored id blindly - see "ID stability" below. `<id>` is always THIS home's own workspace (`fm_backend_herdr_workspace_find`), so recovery never sees a sibling home's tabs. |
 | Workspace create / tab create (focus) | `herdr workspace create --no-focus`, `herdr tab create --no-focus` | Verified: neither focuses by default once a workspace already exists in the session, matching pre-P3 (flagless) behavior; `--no-focus` is passed anyway for defense in depth, since the very first workspace ever created in a brand-new session focuses regardless of the flag. `--focus` was separately verified to reliably focus, confirming the flag has real effect. |
 | Session targeting for DESTRUCTIVE calls | `herdr session stop <name> --session <name> --json`, then `herdr session delete <name> --session <name> --json`; never `herdr server stop` | Used only through `tests/herdr-test-safety.sh`, which re-queries `herdr session list --json` before every destructive call. See "Session targeting" below - `HERDR_SESSION` alone is not reliably honored once another herdr server is already running on the machine. |

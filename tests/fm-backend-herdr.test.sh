@@ -55,6 +55,87 @@ SH
   printf '%s\n' "$fb"
 }
 
+# make_herdr_statefake: a STATEFUL `herdr` stub that models the parts of herdr's
+# real container behavior the workspace-leak fix depends on, so a full
+# spawn->teardown cycle can be replayed repeatedly and the "one persistent
+# firstmate workspace, no orphans" invariant asserted end to end (the canned,
+# call-numbered make_herdr_fakebin above cannot model state carried ACROSS
+# calls). Backed by a JSON state file ($FM_FAKE_HERDR_STATE) mutated with real
+# jq. Modeled behaviors, all verified real-herdr facts recorded in
+# docs/herdr-backend.md: `workspace create` seeds the new workspace with one
+# auto-created default tab (label "1"); `pane close` removes the pane's
+# single-pane tab (closing a tab's only pane closes the tab); `workspace list`
+# / `tab list` / `pane list` reflect live state. Every call is logged to
+# $FM_HERDR_LOG in the same unit-separated form as make_herdr_fakebin.
+make_herdr_statefake() {  # <dir> -> echoes fakebin dir; seeds an empty state file
+  local dir=$1 fb="$1/fakebin"
+  mkdir -p "$fb"
+  printf '{"next":1,"workspaces":[],"tabs":[]}\n' > "$dir/state.json"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+LOG="${FM_HERDR_LOG:?}"
+STATE="${FM_FAKE_HERDR_STATE:?}"
+{
+  printf 'HERDR_SESSION=%s' "${HERDR_SESSION:-}"
+  for a in "$@"; do printf '\x1f%s' "$a"; done
+  printf '\n'
+} >> "$LOG"
+
+jq_state() { jq "$@" "$STATE"; }
+save() { local tmp="$STATE.tmp.$$"; cat > "$tmp" && mv "$tmp" "$STATE"; }
+
+cmd=${1:-}; sub=${2:-}
+ws=""; label=""
+args=("$@")
+for ((i=0; i<${#args[@]}; i++)); do
+  case "${args[$i]}" in
+    --workspace) ws=${args[$((i+1))]:-} ;;
+    --label) label=${args[$((i+1))]:-} ;;
+  esac
+done
+
+case "$cmd $sub" in
+  "status --json")
+    printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n'
+    ;;
+  "workspace list")
+    jq_state '{result:{workspaces:.workspaces}}'
+    ;;
+  "workspace create")
+    n=$(jq_state -r '.next'); wsid="w$n"; dn=$((n + 1))
+    jq_state --arg wsid "$wsid" --arg wlabel "$label" \
+      --arg tabid "$wsid:t$dn" --arg paneid "$wsid:p$dn" \
+      '.workspaces += [{workspace_id:$wsid, label:$wlabel}]
+       | .tabs += [{tab_id:$tabid, label:"1", workspace_id:$wsid, pane_id:$paneid}]
+       | .next = (.next + 2)' | save
+    printf '{"result":{"workspace":{"workspace_id":"%s","label":"%s"}}}\n' "$wsid" "$label"
+    ;;
+  "tab list")
+    jq_state --arg w "$ws" '{result:{tabs:[.tabs[]|select(.workspace_id==$w)]}}'
+    ;;
+  "tab create")
+    n=$(jq_state -r '.next'); tabid="$ws:t$n"; paneid="$ws:p$n"
+    jq_state --arg w "$ws" --arg wlabel "$label" --arg tabid "$tabid" --arg paneid "$paneid" \
+      '.tabs += [{tab_id:$tabid, label:$wlabel, workspace_id:$w, pane_id:$paneid}]
+       | .next = (.next + 1)' | save
+    printf '{"result":{"tab":{"tab_id":"%s"},"root_pane":{"pane_id":"%s"}}}\n' "$tabid" "$paneid"
+    ;;
+  "pane list")
+    jq_state --arg w "$ws" '{result:{panes:[.tabs[]|select(.workspace_id==$w)|{pane_id:.pane_id, tab_id:.tab_id}]}}'
+    ;;
+  "pane close")
+    pane=${3:-}
+    jq_state --arg p "$pane" '.tabs |= [.[]|select(.pane_id != $p)]' | save
+    ;;
+  *) : ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/herdr"
+  printf '%s\n' "$fb"
+}
+
 # herdr_case <name> -> sets up FM_HERDR_LOG/FM_HERDR_RESPONSES/fb for one test,
 # registers cleanup-free tmp dirs under TMP_ROOT.
 herdr_env() {  # <name>
@@ -596,6 +677,65 @@ SH
   pass "fm-peek/fm-send: explicit stale targets matching metadata use the recorded backend"
 }
 
+# --- workspace lifecycle: reuse, no orphans, default-tab pruning -------------
+
+test_workspace_ensure_prunes_default_tab() {
+  local dir log state fb container wsid defcount
+  dir="$TMP_ROOT/prune-default"; mkdir -p "$dir"; log="$dir/log"; state="$dir/state.json"; : > "$log"
+  fb=$(make_herdr_statefake "$dir")
+  container=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /proj' "$ROOT" ) \
+    || fail "container_ensure failed against the stateful fake"
+  wsid=${container#*:}
+  # herdr seeds a fresh workspace with one auto-created default tab (label "1");
+  # the adapter must close it so the workspace holds only real task tabs.
+  defcount=$(jq -r --arg w "$wsid" '[.tabs[]|select(.workspace_id==$w)]|length' "$state")
+  [ "$defcount" = 0 ] || fail "the auto-created default tab should be pruned on workspace creation, $defcount tab(s) remain: $(jq -c '.tabs' "$state")"
+  assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''close' "workspace_ensure did not close the default tab's pane"
+  pass "fm_backend_herdr_workspace_ensure: prunes herdr's auto-created default tab so only task tabs remain"
+}
+
+test_repeated_cycles_reuse_one_workspace_no_orphans() {
+  local dir log state fb i container wsid ids pane first_ws="" wscount total tabcount created
+  dir="$TMP_ROOT/cycles"; mkdir -p "$dir"; log="$dir/log"; state="$dir/state.json"; : > "$log"
+  fb=$(make_herdr_statefake "$dir")
+  for i in 1 2 3; do
+    container=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /proj' "$ROOT" ) \
+      || fail "cycle $i: container_ensure failed"
+    case "$container" in fmtest:w*) : ;; *) fail "cycle $i: unexpected container '$container'" ;; esac
+    wsid=${container#*:}
+    if [ -z "$first_ws" ]; then
+      first_ws=$wsid
+    else
+      [ "$wsid" = "$first_ws" ] || fail "cycle $i: workspace not reused ('$wsid' != '$first_ws')"
+    fi
+    ids=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task "$1" "$2" /proj' "$ROOT" "$container" "fm-cycle$i" ) \
+      || fail "cycle $i: create_task failed"
+    read -r _ pane <<EOF
+$ids
+EOF
+    [ -n "$pane" ] || fail "cycle $i: create_task returned no pane id"
+    PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_kill "$1"' "$ROOT" "fmtest:$pane" \
+      || fail "cycle $i: kill failed"
+  done
+  # exactly one firstmate workspace survives three spawn/teardown cycles
+  wscount=$(jq -r '[.workspaces[]|select(.label=="firstmate")]|length' "$state")
+  [ "$wscount" = 1 ] || fail "expected exactly 1 firstmate workspace after 3 cycles, got $wscount: $(jq -c '.workspaces' "$state")"
+  # and no orphaned workspaces of any label
+  total=$(jq -r '.workspaces|length' "$state")
+  [ "$total" = 1 ] || fail "expected no orphaned workspaces after 3 cycles, got $total total: $(jq -c '.workspaces' "$state")"
+  # zero tabs remain: every fm- task tab torn down AND the default tab pruned
+  tabcount=$(jq -r '.tabs|length' "$state")
+  [ "$tabcount" = 0 ] || fail "expected 0 tabs after teardown (default tab pruned, task tabs killed), got $tabcount: $(jq -c '.tabs' "$state")"
+  # the workspace was minted once and reused thereafter, never re-created
+  created=$(grep -c $'\x1f''workspace'$'\x1f''create' "$log")
+  [ "$created" = 1 ] || fail "workspace create should run exactly once across 3 cycles (reuse, not re-mint), ran $created times"
+  pass "herdr repeated spawn/teardown: one persistent firstmate workspace reused, zero orphans, default tab pruned, create ran once"
+}
+
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
 
@@ -612,6 +752,8 @@ test_container_ensure_starts_server_and_workspace
 test_container_ensure_reuses_existing_workspace
 test_container_ensure_creates_with_no_focus_flag
 test_container_ensure_uses_secondmate_home_label
+test_workspace_ensure_prunes_default_tab
+test_repeated_cycles_reuse_one_workspace_no_orphans
 test_create_task_refuses_duplicate_label
 test_create_task_creates_and_parses_ids
 test_create_task_creates_with_no_focus_flag

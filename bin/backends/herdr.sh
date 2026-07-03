@@ -169,8 +169,32 @@ fm_backend_herdr_workspace_find() {  # <session>
   local session=$1 label list
   label=$(fm_backend_herdr_workspace_label)
   list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 0
-  printf '%s' "$list" | jq -r --arg label "$label" \
-    '.result.workspaces[]? | select(.label == $label) | .workspace_id' 2>/dev/null | head -1
+  # NOTE: the jq variable is $want, NOT $label - `label` is a jq reserved
+  # keyword (label/break), so declaring a jq variable named "label" is a
+  # compile error that `2>/dev/null` would silently swallow, making this find
+  # ALWAYS return empty and every spawn mint a fresh "firstmate" workspace
+  # (the workspace leak).
+  printf '%s' "$list" | jq -r --arg want "$label" \
+    '.result.workspaces[]? | select(.label == $want) | .workspace_id' 2>/dev/null | head -1
+}
+
+# fm_backend_herdr_workspace_prune_default_tabs: close the tab herdr
+# auto-creates inside a freshly created workspace (label "1", never an
+# fm-<id> task tab), so the persistent "firstmate" workspace holds only real
+# task tabs - the documented one-tab-per-task shape. Runs only on the create
+# path (find already reuses an existing workspace), when the ONLY tab present
+# is that auto-created default, so filtering to non-fm- tabs never touches a
+# task tab. Best-effort: a failure here never fails the spawn, mirroring the
+# fm_backend_herdr_kill `|| true` contract.
+fm_backend_herdr_workspace_prune_default_tabs() {  # <session> <workspace_id>
+  local session=$1 wsid=$2 tabs tab_id pane_id
+  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 0
+  while IFS= read -r tab_id; do
+    [ -n "$tab_id" ] || continue
+    pane_id=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id") || continue
+    [ -n "$pane_id" ] || continue
+    fm_backend_herdr_cli "$session" pane close "$pane_id" >/dev/null 2>&1 || true
+  done < <(printf '%s' "$tabs" | jq -r '.result.tabs[]? | select((.label // "" | startswith("fm-")) | not) | .tab_id' 2>/dev/null)
 }
 
 # fm_backend_herdr_workspace_ensure: this HOME's persistent workspace inside
@@ -193,6 +217,9 @@ fm_backend_herdr_workspace_ensure() {  # <session> <cwd>
   out=$(fm_backend_herdr_cli "$session" workspace create --cwd "$cwd" --label "$label" --no-focus 2>/dev/null) || return 1
   wsid=$(printf '%s' "$out" | jq -r '.result.workspace.workspace_id // empty' 2>/dev/null)
   [ -n "$wsid" ] || return 1
+  # Herdr seeds a new workspace with one auto-created default tab firstmate
+  # never uses; drop it so only task tabs remain. Best-effort.
+  fm_backend_herdr_workspace_prune_default_tabs "$session" "$wsid"
   printf '%s' "$wsid"
 }
 
@@ -220,7 +247,7 @@ fm_backend_herdr_create_task() {  # <container> <label> <cwd>
   session=${container%%:*}
   wsid=${container#*:}
   list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
-  dup=$(printf '%s' "$list" | jq -r --arg label "$label" '.result.tabs[]? | select(.label == $label) | .tab_id' 2>/dev/null | head -1)
+  dup=$(printf '%s' "$list" | jq -r --arg want "$label" '.result.tabs[]? | select(.label == $want) | .tab_id' 2>/dev/null | head -1)
   if [ -n "$dup" ]; then
     echo "error: herdr tab '$label' already exists in workspace $wsid (session $session)" >&2
     return 1
@@ -417,8 +444,8 @@ fm_backend_herdr_resolve_bare_selector() {  # <name>
   while IFS= read -r session; do
     [ -n "$session" ] || continue
     tabs=$(fm_backend_herdr_cli "$session" tab list 2>/dev/null) || continue
-    tab_id=$(printf '%s' "$tabs" | jq -r --arg label "$name" \
-      '.result.tabs[]? | select(.label == $label) | .tab_id' 2>/dev/null | head -1)
+    tab_id=$(printf '%s' "$tabs" | jq -r --arg want "$name" \
+      '.result.tabs[]? | select(.label == $want) | .tab_id' 2>/dev/null | head -1)
     [ -n "$tab_id" ] || continue
     wsid=$(printf '%s' "$tabs" | jq -r --arg tab "$tab_id" '.result.tabs[]? | select(.tab_id == $tab) | .workspace_id' 2>/dev/null | head -1)
     [ -n "$wsid" ] || continue
