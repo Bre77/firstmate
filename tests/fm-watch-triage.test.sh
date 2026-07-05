@@ -420,7 +420,10 @@ test_herdr_idle_busy_banner_uses_pane_hash() {
     [ -n "$current" ] && [ "$current" != "agentstate:idle" ] && break
     sleep 0.1
   done
-  [ -n "${current:-}" ] && [ "$current" != "agentstate:idle" ] || { reap "$pid"; fail "idle pane with busy banner did not use pane-content hash"; }
+  if [ -z "${current:-}" ] || [ "$current" = "agentstate:idle" ]; then
+    reap "$pid"
+    fail "idle pane with busy banner did not use pane-content hash"
+  fi
   [ ! -e "$state/.stale-$key" ] || { reap "$pid"; fail "idle pane with busy banner did not clear stale suppressor"; }
   printf 'esc to interrupt\nrunning long tool output 2\n' > "$fakebin/pane-body"
   if ! wait_live "$pid" 30; then
@@ -455,7 +458,10 @@ test_herdr_settled_stale_resurfaces_after_busy_transition() {
     [ -n "$current" ] && [ "$current" != "agentstate:idle" ] && break
     sleep 0.1
   done
-  [ -n "${current:-}" ] && [ "$current" != "agentstate:idle" ] || { reap "$pid"; fail "watcher did not record the intervening busy signal"; }
+  if [ -z "${current:-}" ] || [ "$current" = "agentstate:idle" ]; then
+    reap "$pid"
+    fail "watcher did not record the intervening busy signal"
+  fi
   [ ! -e "$state/.stale-$key" ] || { reap "$pid"; fail "busy transition did not clear the stale suppressor"; }
   printf 'idle\n' > "$fakebin/agent-status"
   printf 'settled again\n' > "$fakebin/pane-body"
