@@ -185,14 +185,24 @@ busy_state_is_busy() {  # <bs> <tail40>
 # harness UI (claude's timer-driven recap line, rotating tips, animated
 # "for Xm Ys" summaries, transient slash-completion menus) keeps ONE signal and
 # is surfaced once, instead of minting a fresh stale hash every few minutes.
-# Content normalization cannot fix this robustly, because those volatile rows
+# An idle verdict is treated as settled only when the same last-6-nonblank-line
+# BUSY_REGEX corroboration used by the fallback path does not see the busy banner,
+# because docs/herdr-backend.md records that herdr can report idle during a long
+# foreground tool call while the pane still renders "esc to interrupt".
+# Content normalization cannot fix repaint churn robustly, because volatile rows
 # also shift a variable-length prefix through the tail-N hash window. For tmux
-# (busy state always unknown) and for a herdr pane whose state is busy/unknown,
-# the signal is the pane-content hash exactly as before, so the proven tmux path
-# is unchanged byte-for-byte.
+# (busy state always unknown), busy/unknown herdr panes, and idle herdr panes
+# that still look busy, the signal is the pane-content hash exactly as before,
+# so the proven tmux path is unchanged byte-for-byte.
 stale_signal() {  # <bs> <tail40>
   case "$1" in
-    idle) printf 'agentstate:idle' ;;
+    idle)
+      if printf '%s' "$2" | grep -v '^[[:space:]]*$' | tail -6 | grep -qiE "$BUSY_REGEX"; then
+        printf '%s' "$2" | hash_pane
+      else
+        printf 'agentstate:idle'
+      fi
+      ;;
     *) printf '%s' "$2" | hash_pane ;;
   esac
 }

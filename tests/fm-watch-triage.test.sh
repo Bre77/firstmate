@@ -395,6 +395,41 @@ test_herdr_settled_stale_signal_is_semantic() {
   pass "herdr settled pane: stale-dedup signal is the semantic agent state, not the volatile pane hash"
 }
 
+test_herdr_idle_busy_banner_uses_pane_hash() {
+  local dir state fakebin out window key sig pid current
+  command -v jq >/dev/null 2>&1 || { pass "herdr idle-busy stale-signal test skipped (jq not installed, required by the herdr adapter)"; return; }
+  dir=$(make_case herdr-idle-busy-signal); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  window="default:w1:p2"
+  fm_write_meta "$state/hs.meta" "window=$window" "backend=herdr" "kind=ship"
+  printf 'done: PR https://example.test/pr/9\n' > "$state/hs.status"
+  sig=$(seen_sig "$state/hs.status"); printf '%s' "$sig" > "$state/.seen-hs_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf 'agentstate:idle' > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf 'agentstate:idle' > "$state/.stale-$key"
+  make_herdr_dynamic_stale_fakebin "$fakebin"
+  printf 'idle\n' > "$fakebin/agent-status"
+  printf 'esc to interrupt\nrunning long tool output 1\n' > "$fakebin/pane-body"
+  export FM_FAKE_CREW_STATE='state: done · source: run-step · complete'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  for _ in $(seq 1 40); do
+    current=$(cat "$state/.hash-$key" 2>/dev/null || true)
+    [ -n "$current" ] && [ "$current" != "agentstate:idle" ] && break
+    sleep 0.1
+  done
+  [ -n "${current:-}" ] && [ "$current" != "agentstate:idle" ] || { reap "$pid"; fail "idle pane with busy banner did not use pane-content hash"; }
+  [ ! -e "$state/.stale-$key" ] || { reap "$pid"; fail "idle pane with busy banner did not clear stale suppressor"; }
+  printf 'esc to interrupt\nrunning long tool output 2\n' > "$fakebin/pane-body"
+  if ! wait_live "$pid" 30; then
+    fail "idle pane with changing busy-banner output surfaced stale: $(cat "$out")"
+  fi
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "herdr idle pane: busy banner keeps stale signal on pane-content hash"
+}
+
 test_herdr_settled_stale_resurfaces_after_busy_transition() {
   local dir state fakebin out drain_out window key sig pid i current
   command -v jq >/dev/null 2>&1 || { pass "herdr stale-resurface test skipped (jq not installed, required by the herdr adapter)"; return; }
@@ -769,6 +804,7 @@ test_working_note_not_working_surfaced
 test_actionable_signal_surfaced
 test_terminal_stale_surfaced
 test_herdr_settled_stale_signal_is_semantic
+test_herdr_idle_busy_banner_uses_pane_hash
 test_herdr_settled_stale_resurfaces_after_busy_transition
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated

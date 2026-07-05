@@ -225,9 +225,9 @@ On herdr this churned: an idle or done `claude` pane repaints timer-driven volat
 Verified live against the real herdr 0.7.1 backend on 2026-07-05 by capturing `herdr pane read --source recent --lines 200` for every workspace pane every 20 seconds for ~7 minutes and correlating with each pane's `agent get` state: a `done` pane produced 4 distinct hashes over the window and an `idle` pane 8, each one a spurious stale re-wake, while a plain post-exit shell pane stayed at 1.
 Line-stripping the volatile rows before hashing does not converge, because those rows also change the total line count, which shifts the tail-N hash window over a variable-length prefix (measured: stripping still left 3 distinct hashes across 4 `done`-pane samples).
 
-The fix keys the stale-dedup signal on the native SETTLED agent state instead of the pane content.
-When `fm_backend_busy_state` reports `idle` (herdr's `idle`/`done`/`blocked`, per the "Busy state" row above), the watcher hashes the constant `agentstate:idle` rather than the capture, so a settled pane that merely repaints keeps one signal and is surfaced once; a genuine state change still mints a new signal and surfaces once.
-tmux (busy state always `unknown`) and a herdr pane whose state is `working`/`unknown` keep the pane-content hash exactly as before, so the proven default path is unchanged byte-for-byte.
+The fix keys the stale-dedup signal on the native SETTLED agent state instead of the pane content, but only after corroborating that the idle pane no longer renders the busy banner described in the 2026-07-02 gap above.
+When `fm_backend_busy_state` reports `idle` (herdr's `idle`/`done`/`blocked`, per the "Busy state" row above) and the last 6 non-blank pane lines do not match `BUSY_REGEX`, the watcher hashes the constant `agentstate:idle` rather than the capture, so a settled pane that merely repaints keeps one signal and is surfaced once; a genuine state change still mints a new signal and surfaces once.
+tmux (busy state always `unknown`), a herdr pane whose state is `working`/`unknown`, and an `idle` herdr pane that still displays the busy banner keep the pane-content hash exactly as before, so the proven default path is unchanged byte-for-byte.
 The same resolved busy state feeds both this signal and the existing busy-suppression check, so herdr's `agent.get` is read once per pane per poll, not twice.
 This is a distinct axis from the 2026-07-02 incident above (a still-working crew misread as not-working); here a correctly-settled crew was surfaced repeatedly rather than once.
 
