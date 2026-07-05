@@ -28,6 +28,9 @@
 # Scout tasks ignore mode - their deliverable is a report, not a merge.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path.
+# PR-producing ship briefs (no-mistakes, direct-PR) also carry the PR-body
+# Intent contract: the opening Intent/What section must be a scannable tree,
+# with long narrative collapsed at the bottom; this scaffold owns that contract.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -221,6 +224,25 @@ EOF
 )
     ;;
 esac
+
+# PR-producing modes (no-mistakes, direct-PR) carry the PR-body Intent contract;
+# local-only has no PR. Same $(cat <<EOF) apostrophe hazard as the DOD blocks above.
+if [ "$MODE" != local-only ]; then
+PRBODY=$(cat <<EOF
+# PR body
+After the PR exists (whether you opened it or the pipeline did), make its opening \`## Intent\` (or \`## What\`) section a scannable tree, not a prose wall; restructure it with \`gh-axi pr edit\` if the auto-generated body needs it.
+- Top-level bullets: the issue or issues addressed, with evidence numbers only where they genuinely matter to a reviewer.
+- Sub-bullets: the fix approach, implications (behavior changes, operational notes, deploy requirements), and explicit scope boundaries (what was deliberately NOT done).
+- Typically 3-8 top-level bullets, nested 2-3 levels max; let the shape flex with the change type (bug fix: issue -> root cause -> fix -> implication; feature: goal -> approach -> limits; ops: what -> why -> blast radius), never a rigid template.
+Long-form narrative or the original task prompt may appear only at the BOTTOM of the body, collapsed inside \`<details><summary>Full narrative / original brief</summary>...</details>\`, never at the top.
+Keep the other body sections (What Changed, Risk Assessment, Testing, evidence details) intact.
+These rules apply where we own the PR template; a repo with its own strict upstream PR template wins - follow that template, and keep the description concise and human: explain why and toward what goal, not a line-by-line tour of the diff (the reviewer reads the code).
+EOF
+)
+DOD="$PRBODY
+
+$DOD"
+fi
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.

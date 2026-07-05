@@ -76,6 +76,36 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD wording avoids the apostrophe regression"
 }
 
+# The PR-body Intent contract rides only on PR-producing modes: no-mistakes and
+# direct-PR briefs get the "# PR body" section (tree-shaped opening section,
+# narrative collapsed at the bottom, gh-axi pr edit as the restructure tool);
+# local-only has no PR, so its brief must not carry the section.
+test_pr_body_contract_by_mode() {
+  local home brief
+  home="$TMP_ROOT/prbody-home"
+  write_registry "$home"
+
+  for id_proj in "brief-prbody-nm-c1:no-registry-proj" "brief-prbody-dp-c2:direct-proj"; do
+    id=${id_proj%%:*}
+    proj=${id_proj##*:}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$id: brief was not scaffolded"
+    assert_grep "# PR body" "$brief" "$id: brief missing the PR body section"
+    assert_grep "scannable tree" "$brief" "$id: PR body section lost the tree requirement"
+    assert_grep "gh-axi pr edit" "$brief" "$id: PR body section lost the restructure tool"
+    assert_grep "BOTTOM of the body" "$brief" "$id: PR body section lost the bottom-narrative rule"
+    assert_grep "strict upstream PR template" "$brief" "$id: PR body section lost the upstream-template exception"
+  done
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-prbody-lo-c3 local-proj >/dev/null 2>&1
+  brief="$home/data/brief-prbody-lo-c3/brief.md"
+  assert_present "$brief" "local-only: brief was not scaffolded"
+  assert_no_grep "# PR body" "$brief" "local-only brief must not carry the PR body section (no PR exists)"
+  pass "fm-brief.sh: PR body contract present for no-mistakes/direct-PR, absent for local-only"
+}
+
 test_script_parses
 test_ship_modes_generate_clean_briefs
 test_no_mistakes_dod_wording
+test_pr_body_contract_by_mode
