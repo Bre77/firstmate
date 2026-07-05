@@ -347,6 +347,26 @@ SH
   chmod +x "$fb/herdr"
 }
 
+make_herdr_dynamic_stale_fakebin() {  # <fakebin-dir>
+  local fb=$1
+  mkdir -p "$fb"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+agent=$(cat "$dir/agent-status" 2>/dev/null || printf idle)
+case "${1:-} ${2:-}" in
+  "status --json") printf '{"client":{"protocol":14},"server":{"running":true}}\n' ;;
+  "agent get")     printf '{"result":{"agent":{"agent_status":"%s"}}}\n' "$agent" ;;
+  "pane read")     cat "$dir/pane-body" 2>/dev/null || true ;;
+  "pane get")      printf '{"result":{"pane":{"pane_id":"p"}}}\n' ;;
+  *) : ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/herdr"
+}
+
 test_herdr_settled_stale_signal_is_semantic() {
   local dir state fakebin out drain_out window key sig pid
   command -v jq >/dev/null 2>&1 || { pass "herdr stale-signal test skipped (jq not installed, required by the herdr adapter)"; return; }
@@ -373,6 +393,42 @@ test_herdr_settled_stale_signal_is_semantic() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the herdr stale failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "herdr stale was not queued"
   pass "herdr settled pane: stale-dedup signal is the semantic agent state, not the volatile pane hash"
+}
+
+test_herdr_settled_stale_resurfaces_after_busy_transition() {
+  local dir state fakebin out drain_out window key sig pid i current
+  command -v jq >/dev/null 2>&1 || { pass "herdr stale-resurface test skipped (jq not installed, required by the herdr adapter)"; return; }
+  dir=$(make_case herdr-stale-resurface); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  window="default:w1:p2"
+  fm_write_meta "$state/hs.meta" "window=$window" "backend=herdr" "kind=ship"
+  printf 'done: PR https://example.test/pr/9\n' > "$state/hs.status"
+  sig=$(seen_sig "$state/hs.status"); printf '%s' "$sig" > "$state/.seen-hs_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf 'agentstate:idle' > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf 'agentstate:idle' > "$state/.stale-$key"
+  make_herdr_dynamic_stale_fakebin "$fakebin"
+  printf 'working\n' > "$fakebin/agent-status"
+  printf 'busy render\n' > "$fakebin/pane-body"
+  export FM_FAKE_CREW_STATE='state: done · source: run-step · complete'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  for i in $(seq 1 40); do
+    current=$(cat "$state/.hash-$key" 2>/dev/null || true)
+    [ -n "$current" ] && [ "$current" != "agentstate:idle" ] && break
+    sleep 0.1
+  done
+  [ -n "${current:-}" ] && [ "$current" != "agentstate:idle" ] || { reap "$pid"; fail "watcher did not record the intervening busy signal"; }
+  [ ! -e "$state/.stale-$key" ] || { reap "$pid"; fail "busy transition did not clear the stale suppressor"; }
+  printf 'idle\n' > "$fakebin/agent-status"
+  printf 'settled again\n' > "$fakebin/pane-body"
+  wait_for_exit "$pid" 40 || fail "watcher did not resurface a settled herdr pane after intervening work"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "watcher did not print the resurfaced herdr stale wake"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the resurfaced herdr stale failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "resurfaced herdr stale was not queued"
+  unset FM_FAKE_CREW_STATE
+  pass "herdr settled pane: stale suppressor resets after intervening work"
 }
 
 # --- stale pane, STALE terminal status overridden by an active run: absorbed ---
@@ -713,6 +769,7 @@ test_working_note_not_working_surfaced
 test_actionable_signal_surfaced
 test_terminal_stale_surfaced
 test_herdr_settled_stale_signal_is_semantic
+test_herdr_settled_stale_resurfaces_after_busy_transition
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_nonterminal_stale_not_working_surfaced

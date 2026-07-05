@@ -582,7 +582,7 @@ EOF
     else
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
-      # Pane content changed: the crew is active again, so reset the escalation timer.
+      rm -f "$sf"
       rm -f "$ssf"
     fi
   done < <(recorded_windows)
