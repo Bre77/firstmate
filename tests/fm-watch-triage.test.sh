@@ -8,9 +8,10 @@
 # provably-working no-verb wakes absorbed (no exit, no queue entry, suppressor
 # advanced, beacon fresh), stopped-crew no-verb wakes surfaced (queue + exit),
 # provably-working stale panes absorbed-then-escalated past the threshold,
-# terminal-looking stale status lines overridden by an active run, the heartbeat
-# backstop fail-safe, and afk coherence (no double-triage while the away-mode
-# daemon owns supervision).
+# terminal-looking stale status lines overridden by an active run, settled herdr
+# panes deduped by semantic agent state rather than volatile repainting content,
+# the heartbeat backstop fail-safe, and afk coherence (no double-triage while the
+# away-mode daemon owns supervision).
 #
 # Daemon-side classification/injection lives in fm-daemon.test.sh; watcher/lock
 # liveness in fm-watcher-lock.test.sh; the durable-queue safety matrix in
