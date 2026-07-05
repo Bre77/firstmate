@@ -158,23 +158,42 @@ hash_pane() {
   if command -v md5 >/dev/null 2>&1; then md5 -q; else md5sum | cut -d' ' -f1; fi
 }
 
-# window_is_busy: 0 (busy) iff the task's harness is actively working. Prefers
-# a backend's native semantic busy state (fm_backend_busy_state - herdr's
-# agent.get; herdr-addendum "busy state" row, "the first backend where
-# fm_session_busy_state gets real semantics"); falls back to the existing
-# pane-tail regex ONLY when the backend reports unknown (tmux always does, so
-# its path is unchanged byte-for-byte). <tail40> is the same bounded capture
-# already read for hashing, so this adds no extra backend calls on the
-# regex-fallback path.
-window_is_busy() {  # <window> <tail40>
-  local w=$1 tail40=$2 bs
-  bs=$(fm_backend_busy_state "$(window_backend "$w")" "$w" 2>/dev/null)
-  case "$bs" in
+# busy_state_is_busy: 0 (busy) iff the task's harness is actively working, from
+# an ALREADY-RESOLVED backend busy state <bs> (busy|idle|unknown) plus the
+# <tail40> capture. A backend that reports a semantic state (herdr's agent.get -
+# the herdr-addendum "busy state" row) decides directly; unknown (tmux always,
+# and herdr when it cannot read the agent) falls back to the last 6 non-blank
+# lines of the pane tail matched against the busy regex, so the tmux path is
+# byte-identical. The stale loop resolves the backend busy state ONCE and shares
+# it with stale_signal below, so herdr's agent.get is not called twice per pane
+# per poll.
+busy_state_is_busy() {  # <bs> <tail40>
+  case "$1" in
     busy) return 0 ;;
     idle) return 1 ;;
     *)
-      printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 | grep -qiE "$BUSY_REGEX"
+      printf '%s' "$2" | grep -v '^[[:space:]]*$' | tail -6 | grep -qiE "$BUSY_REGEX"
       ;;
+  esac
+}
+
+# stale_signal: the value the stale-dedup logic hashes for a window given its
+# ALREADY-RESOLVED backend busy state <bs> and <tail40> capture. This is the
+# herdr stale-echo-churn fix. On a backend with a native SETTLED agent state
+# (herdr reports idle for idle/done/blocked), the signal is that semantic state,
+# NOT the pane content - so a settled pane that merely REPAINTS its volatile
+# harness UI (claude's timer-driven recap line, rotating tips, animated
+# "for Xm Ys" summaries, transient slash-completion menus) keeps ONE signal and
+# is surfaced once, instead of minting a fresh stale hash every few minutes.
+# Content normalization cannot fix this robustly, because those volatile rows
+# also shift a variable-length prefix through the tail-N hash window. For tmux
+# (busy state always unknown) and for a herdr pane whose state is busy/unknown,
+# the signal is the pane-content hash exactly as before, so the proven tmux path
+# is unchanged byte-for-byte.
+stale_signal() {  # <bs> <tail40>
+  case "$1" in
+    idle) printf 'agentstate:idle' ;;
+    *) printf '%s' "$2" | hash_pane ;;
   esac
 }
 
@@ -460,8 +479,14 @@ EOF
     # A secondmate idling on its own watcher is healthy. Its parent supervises
     # it through status writes and heartbeats, not pane-idle staleness.
     [ "$(window_kind "$w")" = secondmate ] && continue
-    tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
-    h=$(printf '%s' "$tail40" | hash_pane)
+    backend=$(window_backend "$w")
+    tail40=$(fm_backend_capture "$backend" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
+    # Resolve the backend busy state ONCE and derive the stale-dedup signal from
+    # it: for a settled herdr pane the signal is the semantic agent state (so
+    # volatile-UI repaints do not churn a new stale hash), else the pane-content
+    # hash exactly as before (tmux path unchanged).
+    bs=$(fm_backend_busy_state "$backend" "$w" 2>/dev/null)
+    h=$(stale_signal "$bs" "$tail40")
     key=$(printf '%s' "$w" | tr ':/.' '___')
     hf="$STATE/.hash-$key"
     cf="$STATE/.count-$key"
@@ -475,7 +500,7 @@ EOF
       # else the last 6 non-blank lines only (the TUI footer area, where every
       # verified harness renders its busy indicator) so busy-looking strings
       # in displayed content cannot suppress stale detection.
-      if [ "$n" -ge 2 ] && ! window_is_busy "$w" "$tail40"; then
+      if [ "$n" -ge 2 ] && ! busy_state_is_busy "$bs" "$tail40"; then
         # The pane is idle/stale at hash $h. Triage decides whether this wakes
         # firstmate. Detection itself is unchanged from above.
         if afk_present; then

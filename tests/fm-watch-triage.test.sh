@@ -318,6 +318,63 @@ test_terminal_stale_surfaced() {
   pass "a stale pane sitting on a terminal status is surfaced (queue + exit)"
 }
 
+# --- herdr semantic stale signal (stale-echo-churn fix) ---------------------
+# A settled (idle/done) herdr pane repaints volatile harness UI on a timer (the
+# recap line, rotating tips, animated "for Xm Ys" summaries, slash menus), so
+# the stale-dedup signal must be the SEMANTIC agent state, not the volatile pane
+# hash - otherwise each repaint mints a fresh stale hash and re-wakes the
+# supervisor for a crew that has not changed.
+
+# make_herdr_stale_fakebin: a minimal `herdr` stub answering the calls the
+# watcher's herdr capture + busy-state reads make, with a canned agent status
+# and an arbitrary pane body (the body is deliberately irrelevant here - the
+# whole point is that the signal ignores it).
+make_herdr_stale_fakebin() {  # <fakebin-dir> <agent-status> <pane-body>
+  local fb=$1 agent=$2 body=$3
+  mkdir -p "$fb"
+  cat > "$fb/herdr" <<SH
+#!/usr/bin/env bash
+set -u
+case "\${1:-} \${2:-}" in
+  "status --json") printf '{"client":{"protocol":14},"server":{"running":true}}\n' ;;
+  "agent get")     printf '{"result":{"agent":{"agent_status":"$agent"}}}\n' ;;
+  "pane read")     printf '%s\n' "$body" ;;
+  "pane get")      printf '{"result":{"pane":{"pane_id":"p"}}}\n' ;;
+  *) : ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/herdr"
+}
+
+test_herdr_settled_stale_signal_is_semantic() {
+  local dir state fakebin out drain_out window key sig pid
+  command -v jq >/dev/null 2>&1 || { pass "herdr stale-signal test skipped (jq not installed, required by the herdr adapter)"; return; }
+  dir=$(make_case herdr-stale-signal); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  window="default:w1:p2"
+  fm_write_meta "$state/hs.meta" "window=$window" "backend=herdr" "kind=ship"
+  printf 'done: PR https://example.test/pr/9\n' > "$state/hs.status"
+  sig=$(seen_sig "$state/hs.status"); printf '%s' "$sig" > "$state/.seen-hs_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  # Pre-seed the pane as already-seen at the SEMANTIC signal so the next poll
+  # confirms it stably stale (n>=2). The fake herdr's pane body is arbitrary and
+  # would churn a content hash on every repaint; the signal must ignore it.
+  printf 'agentstate:idle' > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  make_herdr_stale_fakebin "$fakebin" idle "volatile recap line that would churn a content hash"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not surface a settled herdr stale pane"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "watcher did not print the herdr stale wake"
+  [ "$(cat "$state/.stale-$key" 2>/dev/null)" = "agentstate:idle" ] \
+    || fail "stale signal was not the semantic agent state (got '$(cat "$state/.stale-$key" 2>/dev/null)')"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the herdr stale failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "herdr stale was not queued"
+  pass "herdr settled pane: stale-dedup signal is the semantic agent state, not the volatile pane hash"
+}
+
 # --- stale pane, STALE terminal status overridden by an active run: absorbed ---
 # Regression for the 2026-07 herdr false-surface incidents: a crew's own status
 # log gets no new entry once firstmate hands it to a no-mistakes validation
@@ -655,6 +712,7 @@ test_turn_ended_not_working_surfaced
 test_working_note_not_working_surfaced
 test_actionable_signal_surfaced
 test_terminal_stale_surfaced
+test_herdr_settled_stale_signal_is_semantic
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_nonterminal_stale_not_working_surfaced

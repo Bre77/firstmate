@@ -218,6 +218,19 @@ Together, those gaps let a genuinely still-working herdr crew read as not provab
 The cross-branch attribution fallback now uses the real `no-mistakes runs` command, and the watcher checks provably-working evidence before a stale status-log verb can make a stale pane terminal.
 This does not mask a genuinely human-blocked agent (a permission dialog, not mid-tool-call): that pane does not render the busy banner, so the corroboration still correctly reports not-busy for it.
 
+## Watcher stale-dedup: semantic signal for a settled pane
+
+`bin/fm-watch.sh`'s stale detection hashes a bounded pane capture and surfaces a fresh wake whenever a settled pane produces a new stable hash.
+On herdr this churned: an idle or done `claude` pane repaints timer-driven volatile UI even when the crew has not changed - the `※ recap:` line toggling on and off, rotating `Tip:` lines, the animated `✻ …ed for Xm Ys` summary, and transient slash-completion menus - so the capture's hash flips every few minutes and re-wakes the supervisor for a crew that is genuinely done.
+Verified live against the real herdr 0.7.1 backend on 2026-07-05 by capturing `herdr pane read --source recent --lines 200` for every workspace pane every 20 seconds for ~7 minutes and correlating with each pane's `agent get` state: a `done` pane produced 4 distinct hashes over the window and an `idle` pane 8, each one a spurious stale re-wake, while a plain post-exit shell pane stayed at 1.
+Line-stripping the volatile rows before hashing does not converge, because those rows also change the total line count, which shifts the tail-N hash window over a variable-length prefix (measured: stripping still left 3 distinct hashes across 4 `done`-pane samples).
+
+The fix keys the stale-dedup signal on the native SETTLED agent state instead of the pane content.
+When `fm_backend_busy_state` reports `idle` (herdr's `idle`/`done`/`blocked`, per the "Busy state" row above), the watcher hashes the constant `agentstate:idle` rather than the capture, so a settled pane that merely repaints keeps one signal and is surfaced once; a genuine state change still mints a new signal and surfaces once.
+tmux (busy state always `unknown`) and a herdr pane whose state is `working`/`unknown` keep the pane-content hash exactly as before, so the proven default path is unchanged byte-for-byte.
+The same resolved busy state feeds both this signal and the existing busy-suppression check, so herdr's `agent.get` is read once per pane per poll, not twice.
+This is a distinct axis from the 2026-07-02 incident above (a still-working crew misread as not-working); here a correctly-settled crew was surfaced repeatedly rather than once.
+
 ## Slash/`$` autocomplete popup hazard (confirmed, same mitigation as tmux)
 
 Typing `/mem` into a live `claude` composer inside a herdr pane and reading the pane back within 0.1 seconds already shows the full autocomplete popup.
