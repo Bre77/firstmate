@@ -854,6 +854,7 @@ These skills are not captain-invocable; they are conditional operating reference
 - `secondmate-provisioning` - load before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited config into, or retiring a secondmate home, and before editing `data/secondmates.md`.
 - `fmx-respond` - load on an `x-mention <request_id>` `check:` wake to handle the mention, on an `x-mode-error ...` `check:` wake to report the X-mode configuration blocker, and on any milestone or terminal wake for an X-linked task before posting its completion follow-up; relevant only when X mode is on.
 - `firstmate-coding-guidelines` - load before changing firstmate's shared, tracked material, as defined by section 1's list, whether editing directly or briefing a crewmate for a firstmate-repo task.
+- `clickstack-alert-response` - load on a `check:` wake whose output names a `clickstack-alert` to triage the ClickStack webhook alert payloads in `state/clickstack-inbox/` and act; fork-only, relevant only when the ClickStack webhook receiver is enabled (`docs/clickstack-webhook.md`).
 
 ## 14. X mode
 
