@@ -465,7 +465,12 @@ test_herdr_settled_stale_resurfaces_after_busy_transition() {
   [ ! -e "$state/.stale-$key" ] || { reap "$pid"; fail "busy transition did not clear the stale suppressor"; }
   printf 'idle\n' > "$fakebin/agent-status"
   printf 'settled again\n' > "$fakebin/pane-body"
-  wait_for_exit "$pid" 40 || fail "watcher did not resurface a settled herdr pane after intervening work"
+  # Generous budget: after flipping back to idle the watcher needs one poll to
+  # record agentstate:idle, then two more to cross the n>=2 stale threshold, at
+  # FM_POLL=1s cadence - a tight budget here races the watcher's own polling and
+  # flakes on slow hosts. The failure mode is hang-until-timeout, so a big
+  # budget costs nothing on the passing path.
+  wait_for_exit "$pid" 200 || fail "watcher did not resurface a settled herdr pane after intervening work"
   grep -Fx "stale: $window" "$out" >/dev/null || fail "watcher did not print the resurfaced herdr stale wake"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the resurfaced herdr stale failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "resurfaced herdr stale was not queued"
