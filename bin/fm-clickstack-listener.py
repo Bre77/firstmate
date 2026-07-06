@@ -41,7 +41,7 @@ from urllib.parse import parse_qs, urlparse
 
 BIND = os.environ.get("CSHOOK_BIND", "0.0.0.0")
 try:
-    PORT = int(os.environ.get("CSHOOK_PORT", "8092"))
+    PORT = int(os.environ.get("CSHOOK_PORT", "8111"))
 except ValueError:
     PORT = 8092
 SECRET = os.environ.get("CSHOOK_SECRET", "")
