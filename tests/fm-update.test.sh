@@ -92,6 +92,60 @@ run_update() {
   FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>/dev/null
 }
 
+# Build a FORK-MODEL world: two bare remotes (upstream = the source, origin = the
+# fork integration line) that share a common base commit, each advanced by one
+# divergent commit, and a firstmate repo cloned from the fork with an `upstream`
+# remote. The divergence is (ufile=ucontent) upstream vs (ffile=fcontent) on the
+# fork; pass the same path for both to force a merge conflict, different paths for
+# a clean merge. Files seeded at base: AGENTS.md, README.md, bin/tool.sh. Echoes w.
+new_fork_world() {
+  local name=$1 ufile=$2 ucontent=$3 ffile=$4 fcontent=$5 w
+  w="$TMP_ROOT/$name"
+  mkdir -p "$w/home/state" "$w/home/data"
+  touch "$w/home/state/.last-watcher-beat"
+
+  git init -q --bare "$w/upstream.git"
+  git -C "$w/upstream.git" symbolic-ref HEAD refs/heads/main
+  git init -q --bare "$w/origin.git"
+  git -C "$w/origin.git" symbolic-ref HEAD refs/heads/main
+
+  # Common base commit, pushed to BOTH remotes (the fork starts as a mirror of
+  # upstream), so a real 3-way merge is possible.
+  git clone -q "$w/upstream.git" "$w/seed" 2>/dev/null
+  printf 'v1\n' > "$w/seed/AGENTS.md"
+  printf 'r1\n' > "$w/seed/README.md"
+  mkdir -p "$w/seed/bin"
+  printf 'echo a\n' > "$w/seed/bin/tool.sh"
+  git -C "$w/seed" add -A
+  git -C "$w/seed" commit -qm base
+  git -C "$w/seed" push -q origin main
+  git -C "$w/seed" remote add fork "$w/origin.git"
+  git -C "$w/seed" push -q fork main
+
+  # Upstream-only commit on upstream/main.
+  git clone -q "$w/upstream.git" "$w/uwork" 2>/dev/null
+  printf '%s\n' "$ucontent" > "$w/uwork/$ufile"
+  git -C "$w/uwork" add -A
+  git -C "$w/uwork" commit -qm upstream-change
+  git -C "$w/uwork" push -q origin main
+
+  # Fork-only commit on origin/main (the integration line).
+  git clone -q "$w/origin.git" "$w/fwork" 2>/dev/null
+  printf '%s\n' "$fcontent" > "$w/fwork/$ffile"
+  git -C "$w/fwork" add -A
+  git -C "$w/fwork" commit -qm fork-change
+  git -C "$w/fwork" push -q origin main
+
+  # The running firstmate repo: cloned from the fork tip, with an upstream remote,
+  # on branch main. origin/HEAD resolves to main; upstream/HEAD is deliberately
+  # left unset to exercise the main/master fallback in remote_default_branch.
+  git clone -q "$w/origin.git" "$w/main"
+  git -C "$w/main" remote add upstream "$w/upstream.git"
+  git -C "$w/main" remote set-head origin main >/dev/null 2>&1 || true
+
+  printf '%s\n' "$w"
+}
+
 # --- T1: main + secondmate behind, instruction change; FF, not a merge ------
 # Combines the former T1 (fast-forward + reread + nudge signalling) and T2
 # (the advance is a single-parent fast-forward, never a merge commit) into one
@@ -291,6 +345,133 @@ test_unsafe_secondmate_home_skipped_before_git_update() {
   pass "T11 unsafe secondmate home is not fast-forwarded"
 }
 
+# --- F1: fork-model detection true on a fork clone, false on a plain clone --
+test_fork_model_detection() {
+  local w nf
+  w=$(new_fork_world f1 README.md up bin/tool.sh fork)
+  ( . "$ROOT/bin/fm-ff-lib.sh"; is_fork_model "$w/main" ) \
+    || fail "fork model not detected on a clone with a distinct upstream remote"
+  # A plain upstream-origin firstmate (origin only, no upstream remote).
+  nf=$(new_world f1n)
+  ( . "$ROOT/bin/fm-ff-lib.sh"; is_fork_model "$nf/main" ) \
+    && fail "fork model falsely detected on a plain upstream-origin clone"
+  pass "F1 fork-model detection: true with a distinct upstream remote, false without"
+}
+
+# --- F2: phase (a) clean merge integrates upstream and pushes; primary FFs ---
+test_phase_a_clean_merge() {
+  local w out before tip
+  # Upstream changes README.md, the fork changes bin/tool.sh: disjoint paths, so
+  # merging upstream into the integration line is a clean 3-way merge.
+  w=$(new_fork_world f2 README.md up-readme bin/tool.sh fork-tool)
+  add_sm "$w" sm1
+  before=$(git -C "$w/main" rev-parse HEAD)
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "integrate-upstream: integrated " "phase (a) reports a clean integration"
+  assert_contains "$out" "integrate-upstream-status: integrated" "phase (a) status is integrated"
+  assert_not_contains "$out" "integrate-upstream-delegate:" "a clean merge emits no delegation signal"
+
+  # The integration line on the fork now carries BOTH divergent changes.
+  git -C "$w/main" fetch -q origin 2>/dev/null || true
+  tip=$(git -C "$w/main" rev-parse origin/main)
+  [ "$(git -C "$w/main" show "$tip:README.md")" = "up-readme" ] \
+    || fail "integrated tip is missing the upstream change"
+  [ "$(git -C "$w/main" show "$tip:bin/tool.sh")" = "fork-tool" ] \
+    || fail "integrated tip is missing the fork change"
+  # It is a real merge commit (two parents).
+  [ "$(git -C "$w/main" rev-list --parents -n1 "$tip" | wc -w | tr -d ' ')" -eq 3 ] \
+    || fail "integrated tip is not a two-parent merge commit"
+
+  # Phase (b) then fast-forwarded the running primary onto that tip: the move is a
+  # fast-forward (old HEAD is an ancestor of the new tip), preserving the invariant.
+  assert_contains "$out" "firstmate: updated " "phase (b) fast-forwarded the primary onto the integrated tip"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$tip" ] \
+    || fail "primary did not advance to the integrated tip"
+  git -C "$w/main" merge-base --is-ancestor "$before" "$tip" \
+    || fail "primary advance was not a fast-forward (old HEAD not an ancestor of the new tip)"
+  [ "$(git -C "$w/main" symbolic-ref --short HEAD 2>/dev/null)" = "main" ] \
+    || fail "primary left its default branch"
+
+  # No scratch integration worktree is left behind.
+  assert_not_contains "$(git -C "$w/main" worktree list)" "fm-integrate" "scratch merge worktree was cleaned up"
+  pass "F2 phase (a) clean merge integrates upstream, pushes, and the primary fast-forwards"
+}
+
+# --- F3: phase (a) conflict path delegates instead of resolving -------------
+test_phase_a_conflict_delegates() {
+  local w out fork_tip after_tip
+  # Both sides change AGENTS.md from the same base line: an unresolvable 3-way
+  # conflict that phase (a) must hand off rather than resolve in-line.
+  w=$(new_fork_world f3 AGENTS.md up-agents AGENTS.md fork-agents)
+  fork_tip=$(git -C "$w/origin.git" rev-parse main)
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "integrate-upstream: CONFLICT " "phase (a) reports a conflict"
+  assert_contains "$out" "integrate-upstream-status: conflict" "phase (a) status is conflict"
+  assert_contains "$out" "integrate-upstream-delegate:" "phase (a) emits a delegation signal"
+  assert_contains "$out" "AGENTS.md" "the delegation signal names the conflicted path"
+
+  # The integration line was NOT advanced: no half-merged state was pushed.
+  after_tip=$(git -C "$w/origin.git" rev-parse main)
+  [ "$after_tip" = "$fork_tip" ] \
+    || fail "conflict path pushed to the integration line (origin/main moved)"
+
+  # Phase (b) still ran after the conflict: the primary was already at the fork
+  # tip, so it reports already current rather than advancing onto a bad merge.
+  assert_contains "$out" "firstmate: already current" "phase (b) runs after a phase (a) conflict"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$fork_tip" ] \
+    || fail "primary moved despite the unresolved conflict"
+
+  # No scratch integration worktree is left behind.
+  assert_not_contains "$(git -C "$w/main" worktree list)" "fm-integrate" "scratch merge worktree was cleaned up after conflict"
+  pass "F3 phase (a) conflict hands off a delegation signal and leaves the integration line untouched"
+}
+
+# --- F4: non-fork backward compat - phase (a) is skipped entirely -----------
+test_non_fork_backward_compat() {
+  local w out
+  w=$(new_world f4)
+  add_sm "$w" sm1
+  bump_origin "$w" instr
+
+  out=$(run_update "$w")
+
+  # Not a single phase-(a) line appears: a plain upstream-origin firstmate is
+  # byte-for-byte unchanged.
+  assert_not_contains "$out" "integrate-upstream" "non-fork run emits no phase-(a) output at all"
+  # Phase (b) behaves exactly as before.
+  assert_contains "$out" "firstmate: updated " "phase (b) still fast-forwards the primary"
+  assert_contains "$out" "secondmate sm1: updated " "phase (b) still sweeps secondmates"
+  assert_contains "$out" "reread-firstmate: yes" "phase (b) reread signalling unchanged"
+  assert_contains "$out" "nudge-secondmates: main:fm-sm1" "phase (b) nudge signalling unchanged"
+  pass "F4 non-fork firstmate skips phase (a) entirely and behaves as before"
+}
+
+# --- F5: opt-out - FM_UPDATE_NO_INTEGRATE disables phase (a) on a fork -------
+test_phase_a_opt_out() {
+  local w out fork_tip
+  w=$(new_fork_world f5 README.md up-readme bin/tool.sh fork-tool)
+  fork_tip=$(git -C "$w/origin.git" rev-parse main)
+
+  out=$(FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" FM_UPDATE_NO_INTEGRATE=1 "$UPDATE" 2>/dev/null)
+
+  assert_contains "$out" "integrate-upstream: skipped: disabled via FM_UPDATE_NO_INTEGRATE" "opt-out reports the skip"
+  assert_not_contains "$out" "integrate-upstream-status: integrated" "opt-out performs no merge"
+  [ "$(git -C "$w/origin.git" rev-parse main)" = "$fork_tip" ] \
+    || fail "opt-out still advanced the integration line"
+  # Phase (b) still runs.
+  assert_contains "$out" "firstmate: already current" "phase (b) still runs under opt-out"
+  pass "F5 FM_UPDATE_NO_INTEGRATE skips phase (a) on a fork while phase (b) still runs"
+}
+
+test_fork_model_detection
+test_phase_a_clean_merge
+test_phase_a_conflict_delegates
+test_non_fork_backward_compat
+test_phase_a_opt_out
 test_updates_main_and_secondmate
 test_reread_gate_is_instruction_only
 test_dirty_secondmate_skipped

@@ -43,6 +43,42 @@ default_branch() {
   return 1
 }
 
+# Resolve a named remote's default branch (the branch its HEAD points at), for a
+# remote whose tracking refs are already fetched. Reads refs/remotes/<remote>/HEAD
+# when present (set by `git remote set-head <remote> -a`), otherwise falls back to
+# main then master. Echoes the branch name, or returns 1. Used for the `upstream`
+# remote in the fork model, where upstream/HEAD is commonly unset.
+remote_default_branch() {
+  local dir=$1 remote=$2 ref branch
+  ref=$(git -C "$dir" symbolic-ref --quiet --short "refs/remotes/$remote/HEAD" 2>/dev/null || true)
+  if [ -n "$ref" ]; then
+    echo "${ref#"$remote"/}"
+    return 0
+  fi
+  for branch in main master; do
+    if git -C "$dir" show-ref --verify --quiet "refs/remotes/$remote/$branch"; then
+      echo "$branch"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Is this checkout running the fork operating model? True only when it has a
+# distinct `upstream` remote whose URL differs from `origin` - i.e. origin is the
+# fork's integration line and upstream is the read-mostly source. A plain
+# upstream-origin firstmate (no upstream remote, or upstream==origin) is NOT the
+# fork model, so phase (a) integration is skipped and behavior is unchanged.
+is_fork_model() {
+  local dir=$1 origin_url upstream_url
+  origin_url=$(git -C "$dir" remote get-url origin 2>/dev/null || true)
+  upstream_url=$(git -C "$dir" remote get-url upstream 2>/dev/null || true)
+  [ -n "$origin_url" ] || return 1
+  [ -n "$upstream_url" ] || return 1
+  [ "$origin_url" != "$upstream_url" ] || return 1
+  return 0
+}
+
 # Resolve the PRIMARY checkout's current default-branch commit - the local-HEAD
 # sync target every secondmate follows. Reads the default branch *ref* rather than
 # HEAD, so even a primary stranded on a feature branch (the worktree tangle of
@@ -418,4 +454,149 @@ sweep_live_secondmate_metas() {
   while IFS='|' read -r id home window meta; do
     process_secondmate "$id" "$home" "$window" "$base_mode" "$nudge_requires_instr"
   done < <(live_secondmate_meta_records "$state" "$registry")
+}
+
+# --- phase (a): integrate upstream into the fork integration line -----------
+#
+# Merge upstream/<default> into the fork integration line (origin/<default>) so
+# the fork stays current with its source before phase (b) fast-forwards the
+# running primary onto the integration tip. This is the ONLY firstmate self-sync
+# path that MERGES rather than fast-forwards, and it is why it is confined here:
+#   - It runs in an ISOLATED worktree, never the running primary checkout, so the
+#     primary only ever sees phase (b)'s already-fast-forwardable result and the
+#     fast-forward-only invariant on the primary is preserved.
+#   - On a clean merge it pushes the integration line to origin (a fast-forward of
+#     origin/<default>, since the merge commit's first parent is the old tip).
+#   - On CONFLICT it never resolves in-line: it aborts, tears down its scratch
+#     worktree, and reports a delegation signal so firstmate can dispatch an
+#     off-primary crewmate to resolve and push, then re-run.
+# It is a strict no-op (silent, INTEGRATE_STATUS=not-fork) outside the fork model.
+#
+# Sets globals for the caller:
+#   INTEGRATE_STATUS   = not-fork|current|integrated|conflict|error|skipped
+#   INTEGRATE_DELEGATE = merge description + conflicted paths (only when conflict)
+# Both are consumed by the sourcing bin/fm-update.sh, not within this library.
+# shellcheck disable=SC2034
+INTEGRATE_STATUS=""
+# shellcheck disable=SC2034
+INTEGRATE_DELEGATE=""
+integrate_upstream() {
+  local root=$1
+  INTEGRATE_STATUS="not-fork"
+  INTEGRATE_DELEGATE=""
+
+  is_fork_model "$root" || return 0
+
+  local fdefault udefault obase ubase before after wt_parent wt out conflicts
+
+  # Refresh both remotes. Fetching only updates remote-tracking refs, never the
+  # working tree, so it is safe against the running primary. fetch_once dedups the
+  # origin fetch with phase (b), which shares this object store.
+  if ! fetch_once "$root"; then
+    INTEGRATE_STATUS="skipped"
+    echo "integrate-upstream: skipped: origin fetch failed"
+    return 0
+  fi
+  if ! git -C "$root" fetch upstream --prune --quiet 2>/dev/null; then
+    INTEGRATE_STATUS="skipped"
+    echo "integrate-upstream: skipped: upstream fetch failed"
+    return 0
+  fi
+
+  fdefault=$(default_branch "$root") || {
+    INTEGRATE_STATUS="skipped"
+    echo "integrate-upstream: skipped: cannot determine fork default branch"
+    return 0
+  }
+  udefault=$(remote_default_branch "$root" upstream) || {
+    INTEGRATE_STATUS="skipped"
+    echo "integrate-upstream: skipped: cannot determine upstream default branch"
+    return 0
+  }
+  obase="origin/$fdefault"
+  ubase="upstream/$udefault"
+
+  if ! git -C "$root" rev-parse --verify --quiet "$obase^{commit}" >/dev/null; then
+    INTEGRATE_STATUS="skipped"
+    echo "integrate-upstream: skipped: $obase does not exist"
+    return 0
+  fi
+  if ! git -C "$root" rev-parse --verify --quiet "$ubase^{commit}" >/dev/null; then
+    INTEGRATE_STATUS="skipped"
+    echo "integrate-upstream: skipped: $ubase does not exist"
+    return 0
+  fi
+
+  # Nothing to integrate when the integration line already contains upstream.
+  if git -C "$root" merge-base --is-ancestor "$ubase" "$obase" 2>/dev/null; then
+    INTEGRATE_STATUS="current"
+    echo "integrate-upstream: already current ($obase contains $ubase)"
+    return 0
+  fi
+
+  # Merge in an isolated, disposable worktree checked out at the integration tip.
+  # A fresh mktemp path guarantees it is distinct from the primary; the assertion
+  # below is the fm-spawn-style defense in depth.
+  wt_parent=$(mktemp -d "${TMPDIR:-/tmp}/fm-integrate.XXXXXX") || {
+    INTEGRATE_STATUS="error"
+    echo "integrate-upstream: skipped: cannot create scratch directory"
+    return 0
+  }
+  wt="$wt_parent/wt"
+  if ! git -C "$root" worktree add --detach --quiet "$wt" "$obase" 2>/dev/null; then
+    rm -rf "$wt_parent"
+    INTEGRATE_STATUS="error"
+    echo "integrate-upstream: skipped: cannot create isolated worktree"
+    return 0
+  fi
+
+  if ! integration_worktree_is_isolated "$wt" "$root"; then
+    git -C "$root" worktree remove --force "$wt" 2>/dev/null || true
+    rm -rf "$wt_parent"
+    git -C "$root" worktree prune 2>/dev/null || true
+    INTEGRATE_STATUS="error"
+    echo "integrate-upstream: skipped: worktree not isolated from the primary checkout"
+    return 0
+  fi
+
+  before=$(git -C "$root" rev-parse --short "$obase")
+  if git -C "$wt" merge --no-edit "$ubase" >/dev/null 2>&1; then
+    after=$(git -C "$wt" rev-parse --short HEAD)
+    if out=$(git -C "$wt" push --quiet origin "HEAD:$fdefault" 2>&1); then
+      INTEGRATE_STATUS="integrated"
+      echo "integrate-upstream: integrated $ubase into $obase ($before..$after), pushed origin/$fdefault"
+    else
+      INTEGRATE_STATUS="error"
+      echo "integrate-upstream: skipped: push to origin/$fdefault failed: $(first_line "$out")"
+    fi
+  else
+    conflicts=$(git -C "$wt" diff --name-only --diff-filter=U 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+    git -C "$wt" merge --abort 2>/dev/null || true
+    # Output contract read by bin/fm-update.sh, not within this library.
+    # shellcheck disable=SC2034
+    INTEGRATE_STATUS="conflict"
+    # shellcheck disable=SC2034
+    INTEGRATE_DELEGATE="merge $ubase into $obase; conflicted paths: ${conflicts:-unknown}"
+    echo "integrate-upstream: CONFLICT merging $ubase into $obase; off-primary resolution needed (conflicted: ${conflicts:-unknown})"
+  fi
+
+  git -C "$root" worktree remove --force "$wt" 2>/dev/null || true
+  rm -rf "$wt_parent"
+  git -C "$root" worktree prune 2>/dev/null || true
+  return 0
+}
+
+# Assert a merge worktree is a genuine isolated worktree distinct from the primary
+# checkout, mirroring fm-spawn.sh's validate_spawn_worktree. Returns 0 when the
+# worktree resolves to its own top-level path that is not the primary root.
+integration_worktree_is_isolated() {
+  local wt=$1 root=$2 wt_real root_real wt_top wt_top_real
+  wt_real=$(cd "$wt" 2>/dev/null && pwd -P) || return 1
+  root_real=$(cd "$root" 2>/dev/null && pwd -P) || return 1
+  wt_top=$(git -C "$wt" rev-parse --show-toplevel 2>/dev/null || true)
+  [ -n "$wt_top" ] || return 1
+  wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P) || return 1
+  [ "$wt_real" = "$wt_top_real" ] || return 1
+  [ "$wt_real" != "$root_real" ] || return 1
+  return 0
 }
