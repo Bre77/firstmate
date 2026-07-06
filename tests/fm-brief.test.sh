@@ -94,6 +94,12 @@ test_amend_brief_renders_contract() {
   assert_grep "THE ONLY DELIVERABLE IS A NEW PUSHED HEAD ON https://github.com/kunchenguid/firstmate/pull/999, DIFFERENT FROM deadbeef1234." "$brief" \
     "amend brief missing the loud new-head statement"
   assert_grep "deadbeef1234" "$brief" "amend brief lost the required head sha"
+  assert_grep "headRepositoryOwner,headRepository,headRefName,headRefOid" "$brief" \
+    "amend brief must resolve the PR head repository, branch, and sha"
+  assert_grep "git remote add amend-head https://github.com/<owner>/<repo>.git" "$brief" \
+    "amend brief must fetch from the resolved PR head repository"
+  assert_no_grep "git fetch origin <branch>" "$brief" \
+    "amend brief must not assume the PR branch lives on origin"
   assert_grep "do NOT create a new \`fm/$id\` branch" "$brief" "amend brief must check out the existing PR branch, not create fm/<id>"
   assert_no_grep "no-mistakes" "$brief" "amend brief should not carry the standard no-mistakes Definition of done"
   assert_no_grep "EOF" "$brief" "amend brief leaked a heredoc EOF marker (unterminated heredoc)"

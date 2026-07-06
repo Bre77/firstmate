@@ -16,7 +16,9 @@
 #   <sha>, not a new branch or PR. <sha> is a required parameter rather than a
 #   gh lookup performed by this script, because fm-brief.sh does no network I/O
 #   anywhere else - firstmate resolves it once, e.g. via
-#   `gh-axi pr view <pr-url> --json headRefOid`, before scaffolding. This exists
+#   `gh-axi pr view <pr-url> --json headRefOid`, before scaffolding; the crew
+#   then resolves the PR head repository and branch and fetches from that remote,
+#   so same-repo and fork PRs both work. This exists
 #   because a fresh crew handed only "amend this PR" repeatedly read the
 #   branch's already-finished-looking diff and declared done without pushing
 #   anything; the contract now requires the crew to prove the remote head moved.
@@ -192,13 +194,13 @@ You are in a disposable git worktree of $REPO, at a detached HEAD on a clean def
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not check out anything here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
-1. Look up the PR's branch: \`gh-axi pr view $AMEND_PR --json headRefName,headRefOid\`.
-2. Fetch and check out that EXISTING branch - do NOT create a new \`fm/$ID\` branch: \`git fetch origin <branch> && git checkout <branch>\`.
+1. Resolve the PR's head repository and branch: \`gh-axi pr view $AMEND_PR --json headRepositoryOwner,headRepository,headRefName,headRefOid\`.
+2. Add or refresh a remote that points at the resolved head repository, then fetch and check out that EXISTING branch - do NOT create a new \`fm/$ID\` branch: \`git remote remove amend-head 2>/dev/null || true; git remote add amend-head https://github.com/<owner>/<repo>.git; git fetch amend-head <branch>; git checkout -B <branch> amend-head/<branch>\`.
 3. Verify the checked-out head is \`$AMEND_HEAD\`. If \`git rev-parse HEAD\` disagrees, someone already pushed a new head since this brief was written - append \`blocked: PR head moved to {actual sha}, expected $AMEND_HEAD\` to the status file and stop.
 4. Rebase policy: do not rebase onto the default branch and do not force-push unless the task above explicitly asks for it; add new commits on top of the existing head.
 
 # Rules
-1. Never push to the default branch, and never create a new branch for this work - push only to the existing PR branch you checked out in Setup. Never merge a PR.
+1. Never push to the default branch, and never create a new branch for this work - push only to the existing PR branch on the head remote you checked out in Setup. Never merge a PR.
 2. Stay inside this worktree; modify nothing outside it.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
@@ -213,7 +215,7 @@ If the top-level path is the primary checkout or not the worktree you were launc
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
 
 # Definition of done
-Implement the requested change as new commits on top of the branch you checked out, then push to the SAME branch on $AMEND_PR - no new branch, no new PR.
+Implement the requested change as new commits on top of the branch you checked out, then push to the SAME branch on the resolved head remote for $AMEND_PR - no new branch, no new PR.
 Before reporting done, confirm the new remote head differs from $AMEND_HEAD: re-run \`gh-axi pr view $AMEND_PR --json headRefOid\`, or compare \`git rev-parse HEAD\` before and after your push.
 A local commit that was never pushed is NOT done - the deliverable is a new pushed head, not a commit.
 When the new head is pushed and confirmed different from $AMEND_HEAD, append \`done: PR $AMEND_PR new head {sha}\` to the status file and stop.
