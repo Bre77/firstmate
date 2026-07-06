@@ -827,6 +827,7 @@ The scaffold reads the mode via `fm-project-mode.sh`, so you do not pass it.
 Ship briefs also include the project-memory contract: run `bin/fm-ensure-agents-md.sh` when the project already has agent-memory files or when the task produced durable project-intrinsic knowledge, then record proportionate learnings in `AGENTS.md`.
 For scout tasks add `--scout`: the scaffold swaps the definition of done for the report contract (findings to `data/<id>/report.md`, no branch, no push, no PR) and declares the worktree scratch; scout is mode-agnostic.
 Scout briefs do not include the project-memory step, because their deliverable is a report rather than a committed project change.
+For a fork-only change - one that lives only on this fork and is never upstreamed - add `--fork-only`: the scaffold overrides the registered mode with the fork-only contract (branch off the fork's main, validate locally, deliver to the fork via `bin/fm-fork-deliver.sh`, firstmate folds), because this clone's no-mistakes gate always targets upstream and cannot retarget the fork; see `docs/fork-only-delivery.md`.
 For secondmates use `bin/fm-brief.sh <id> --secondmate <project>...`.
 The scaffold writes a charter brief instead of a task brief.
 Set `FM_SECONDMATE_CHARTER='<charter>'` to fill the charter text and `FM_SECONDMATE_SCOPE='<scope>'` when the routing scope differs.

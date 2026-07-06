@@ -6,10 +6,15 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> [--scout]
+# Usage: fm-brief.sh <task-id> <repo-name> [--scout | --fork-only]
 #        fm-brief.sh <task-id> --secondmate <project>...
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
+#   --fork-only writes the fork-only delivery contract instead of the project's
+#   registered upstream mode: branch off the fork's main, validate locally, open a
+#   PR into the fork (not upstream) via bin/fm-fork-deliver.sh, and firstmate folds
+#   it. Use for changes that live only on the fork and are never upstreamed.
+#   See docs/fork-only-delivery.md.
 #   --secondmate writes a persistent secondmate charter. The project list
 #   is cloned into the secondmate home, while the natural-language scope
 #   tells the main firstmate when to route work there; routine churn stays in its own home;
@@ -39,11 +44,13 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 KIND=ship
+FORK_ONLY=false
 POS=()
 for a in "$@"; do
   case "$a" in
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
+    --fork-only) FORK_ONLY=true ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -167,11 +174,39 @@ fi
 
 # Ship task: shape Setup / Rule 1 / Definition of done by the project's delivery mode.
 # yolo does not affect the brief (it governs firstmate's approval behaviour), so discard it.
-read -r MODE _ <<EOF
+# --fork-only is a per-task override of the registered upstream mode, so it skips
+# the registry lookup entirely (see docs/fork-only-delivery.md).
+if "$FORK_ONLY"; then
+  MODE=fork-only
+else
+  read -r MODE _ <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
 EOF
+fi
+
+# The branch-creation step (Setup step 1); fork-only branches off the fork's main
+# instead of the detached-HEAD default so its base is the fork, never upstream.
+# SETUP2 (any extra setup lines) is appended after this in the brief heredoc.
+BRANCH_STEP='1. First action: create your branch: `git checkout -b fm/'"$ID"'`'
 
 case "$MODE" in
+  fork-only)
+    BRANCH_STEP='1. First action: branch off the fork'"'"'s main: `git fetch fork --prune && git checkout -B fm/'"$ID"' fork/main`'
+    SETUP2=""
+    RULE1='1. Never push to the default branch. Push only your `fm/'"$ID"'` branch, and only to the fork remote. Never merge a PR.'
+    DOD=$(cat <<EOF
+# Definition of done
+This is a **fork-only** change: it lives only on the fork and is never upstreamed.
+Do NOT run /no-mistakes - that path validates and opens a PR against the upstream repo, which is wrong here.
+The task is complete only when committed on your branch \`fm/$ID\`.
+When it is implemented and committed, deliver it with:
+\`$FM_ROOT/bin/fm-fork-deliver.sh --title "<pr title>" --body-file <path>\`
+That runs the local quality gate (the fork has no CI), pushes your branch to the fork, and opens a PR into the fork main branch.
+Append \`done: PR {url}\` with the URL it prints and stop.
+The captain reviews and firstmate folds the fork PR; do not merge it yourself.
+EOF
+)
+    ;;
   direct-PR)
     SETUP2=""
     RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
@@ -235,7 +270,7 @@ You are in a disposable git worktree of $REPO, at a detached HEAD on a clean def
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
-1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
+$BRANCH_STEP$SETUP2
 
 # Rules
 $RULE1
