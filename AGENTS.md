@@ -825,9 +825,11 @@ For a ship task the definition of done is shaped by the project's delivery mode 
 The no-mistakes brief points to no-mistakes' version-matched guidance and keeps only firstmate-specific wrapper rules for `ask-user` escalation, `--yes` avoidance, and the CI-green done line.
 The scaffold reads the mode via `fm-project-mode.sh`, so you do not pass it.
 Ship briefs also include the project-memory contract: run `bin/fm-ensure-agents-md.sh` when the project already has agent-memory files or when the task produced durable project-intrinsic knowledge, then record proportionate learnings in `AGENTS.md`.
+PR-producing ship briefs (no-mistakes, direct-PR, fork-only) also carry the PR-body contract, stated in full only in the `bin/fm-brief.sh` scaffold: the crewmate keeps the PR body's opening Intent/What section a scannable tree and relocates long narrative to a bottom collapsed block.
 For scout tasks add `--scout`: the scaffold swaps the definition of done for the report contract (findings to `data/<id>/report.md`, no branch, no push, no PR) and declares the worktree scratch; scout is mode-agnostic.
 Scout briefs do not include the project-memory step, because their deliverable is a report rather than a committed project change.
 For a fork-only change - one that lives only on this fork and is never upstreamed - add `--fork-only`: the scaffold overrides the registered mode with the fork-only contract (branch off the fork's main, validate locally, deliver to the fork via `bin/fm-fork-deliver.sh`, firstmate folds), because this clone's no-mistakes gate always targets upstream and cannot retarget the fork; see `docs/fork-only-delivery.md`.
+For amending an already-open PR, use `--amend <pr-url> --head <sha>`; the full contract and head-resolution guidance live in `bin/fm-brief.sh` and the generated scaffold.
 For secondmates use `bin/fm-brief.sh <id> --secondmate <project>...`.
 The scaffold writes a charter brief instead of a task brief.
 Set `FM_SECONDMATE_CHARTER='<charter>'` to fill the charter text and `FM_SECONDMATE_SCOPE='<scope>'` when the routing scope differs.
