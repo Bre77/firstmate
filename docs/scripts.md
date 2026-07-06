@@ -11,7 +11,7 @@ If you have changed away from the firstmate home in an interactive shell, invoke
 | `fm-fleet-sync.sh`       | Fetch clones, fast-forward safe default-branch states, self-heal clean detached ancestor drift, report unsafe drift as `STUCK:`, and safely prune branches whose remote is gone |
 | `fm-update.sh`           | Self-update the running firstmate repo and registered secondmate homes with fast-forward-only pulls from origin     |
 | `fm-backlog-handoff.sh`  | Move already-judged in-scope queued backlog items from the main home into a seeded secondmate home                 |
-| `fm-brief.sh`            | Scaffold a ship brief with a worktree-isolation assertion, a report-only scout brief with `--scout`, or a secondmate charter with `--secondmate` |
+| `fm-brief.sh`            | Scaffold a ship brief with a worktree-isolation assertion, a report-only scout brief with `--scout`, a fork-only delivery brief with `--fork-only`, or a secondmate charter with `--secondmate` |
 | `fm-ensure-agents-md.sh` | Ensure project `AGENTS.md` is the real memory file and `CLAUDE.md` symlinks to it                                   |
 | `fm-guard.sh`            | Warn when the primary checkout is tangled, when queued wakes are pending, or when a stale or missing watcher needs a prominent banner; `FM_GUARD_READ_ONLY=1` keeps the alarms but suppresses drain, arm, and checkout repair commands |
 | `fm-turnend-guard.sh`    | Claude Code Stop hook, primary-scoped only: blocks (exit 2, exact reason) a primary turn end when work is in flight without a live identity-matched watcher lock and fresh beacon, using Claude Code's own `stop_hook_active` field so it never blocks twice in one turn (docs/turnend-guard.md) |
@@ -27,6 +27,7 @@ If you have changed away from the firstmate home in an interactive shell, invoke
 | `fm-config-push.sh`      | Config-only mid-session push of declared inheritable local config into live secondmate homes; reports each item as pushed, unchanged, skipped, or error without fast-forwarding tracked files or nudging agents |
 | `fm-project-mode.sh`     | Resolve a project's delivery mode and `+yolo` flag from `data/projects.md`                                          |
 | `fm-merge-local.sh`      | Fast-forward a `local-only` project's local default branch after approval                                           |
+| `fm-fork-deliver.sh`     | Deliver a fork-only change: run the local quality gate (CI mirror by default, or `--check`), push the current branch to the fork remote, and open a PR into the fork (never upstream); `--validate-only` runs just the gate (docs/fork-only-delivery.md) |
 | `fm-review-diff.sh`      | Review a crewmate branch or recorded PR head against the authoritative base, warning and falling back to the local branch when an expected PR head cannot be resolved, with optional `--stat` output |
 | `fm-marker-lib.sh`       | Shared from-firstmate request marker and detector sourced by `fm-send.sh`, `fm-brief.sh`, and tests                 |
 | `fm-watch-arm.sh`        | Verified per-home watcher re-arm; reports `started`, `healthy`, or `FAILED`; `--restart` relaunches only this home's watcher |

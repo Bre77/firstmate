@@ -76,6 +76,37 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD wording avoids the apostrophe regression"
 }
 
+# --fork-only overrides the registered mode with the fork-only delivery contract:
+# it must branch off the fork's main, point at bin/fm-fork-deliver.sh, forbid
+# /no-mistakes, and render cleanly (no leaked heredoc EOF, quote-escape artifact,
+# or unreplaced $SETUP2), regardless of the project's registered upstream mode.
+test_fork_only_brief_contract() {
+  local home id brief
+  home="$TMP_ROOT/fork-only-home"
+  write_registry "$home"   # direct-proj is registered [direct-PR]; fork-only must override it
+  id="brief-forkonly-c1"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --fork-only >/dev/null 2>&1 \
+    || fail "$id: --fork-only brief should exit 0"
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "$id: fork-only brief was not scaffolded"
+  assert_grep "**fork-only**" "$brief" "$id: brief missing the fork-only label"
+  assert_grep "git fetch fork --prune && git checkout -B fm/$id fork/main" "$brief" \
+    "$id: fork-only Setup does not branch off the fork's main"
+  assert_grep "bin/fm-fork-deliver.sh" "$brief" "$id: fork-only DOD does not point at fm-fork-deliver.sh"
+  assert_grep "Do NOT run /no-mistakes" "$brief" "$id: fork-only DOD does not forbid /no-mistakes"
+  assert_grep "only to the fork remote" "$brief" "$id: fork-only Rule 1 does not scope pushes to the fork"
+  assert_no_grep "EOF" "$brief" "$id: fork-only brief leaked a heredoc EOF marker"
+  assert_no_grep "\$SETUP2" "$brief" "$id: fork-only brief leaked an unreplaced \$SETUP2"
+  # The apostrophe-escape dance ('"'"') must never leak into rendered text.
+  assert_no_grep "'\"'\"'" "$brief" "$id: fork-only brief leaked a shell quote-escape artifact"
+  # It must NOT regress into the default upstream branch step.
+  assert_no_grep "create your branch: \`git checkout -b fm/$id\`" "$brief" \
+    "$id: fork-only brief kept the default upstream branch step"
+  pass "fm-brief.sh: --fork-only overrides the registered mode with a clean fork-only contract"
+}
+
 test_script_parses
 test_ship_modes_generate_clean_briefs
 test_no_mistakes_dod_wording
+test_fork_only_brief_contract
