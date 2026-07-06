@@ -94,13 +94,21 @@ test_amend_brief_renders_contract() {
   assert_grep "THE ONLY DELIVERABLE IS A NEW PUSHED HEAD ON https://github.com/kunchenguid/firstmate/pull/999, DIFFERENT FROM deadbeef1234." "$brief" \
     "amend brief missing the loud new-head statement"
   assert_grep "deadbeef1234" "$brief" "amend brief lost the required head sha"
-  assert_grep "headRepositoryOwner,headRepository,headRefName,headRefOid" "$brief" \
-    "amend brief must resolve the PR head repository, branch, and sha"
-  assert_grep "git remote add amend-head https://github.com/<owner>/<repo>.git" "$brief" \
-    "amend brief must fetch from the resolved PR head repository"
+  assert_grep "gh-axi pr checkout <number>" "$brief" \
+    "amend brief must check out the PR through gh-axi"
+  assert_grep "where \`<number>\` is the trailing digits of \`https://github.com/kunchenguid/firstmate/pull/999\`" "$brief" \
+    "amend brief must explain how to derive the PR number"
+  assert_grep "Record the original head with \`git rev-parse HEAD\`" "$brief" \
+    "amend brief must record the local original head"
+  assert_grep "confirm \`git rev-parse HEAD\` differs from deadbeef1234 after your successful push" "$brief" \
+    "amend brief must verify the new head locally after push"
+  assert_no_grep "gh-axi pr view .*--json" "$brief" \
+    "amend brief must not rely on unsupported gh-axi pr view --json"
+  assert_no_grep "git remote add amend-head" "$brief" \
+    "amend brief must not hand-roll a PR head remote"
   assert_no_grep "git fetch origin <branch>" "$brief" \
     "amend brief must not assume the PR branch lives on origin"
-  assert_grep "do NOT create a new \`fm/$id\` branch" "$brief" "amend brief must check out the existing PR branch, not create fm/<id>"
+  assert_grep "never create a new branch for this work" "$brief" "amend brief must check out the existing PR branch, not create a new branch"
   assert_no_grep "no-mistakes" "$brief" "amend brief should not carry the standard no-mistakes Definition of done"
   assert_no_grep "EOF" "$brief" "amend brief leaked a heredoc EOF marker (unterminated heredoc)"
   pass "fm-brief.sh: --amend renders the amendment contract with PR url and sha"
