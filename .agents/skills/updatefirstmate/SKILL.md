@@ -18,14 +18,34 @@ It never forces, never creates a merge commit, never stashes, and advances a tar
 A tracked-files fast-forward leaves the gitignored operational dirs (data/, state/, config/, projects/, .no-mistakes/) untouched, so a secondmate's in-flight work is never disrupted.
 This touches only the firstmate repo and its own worktrees, never anything under `projects/`.
 
+## Fork model: upstream integration first
+
+When this firstmate runs the fork operating model - it has a distinct `upstream` remote whose URL differs from `origin` (origin is the fork's integration line, upstream is the read-mostly source) - `bin/fm-update.sh` runs a phase (a) BEFORE the fast-forward sweep: it merges `upstream/<default>` into the fork integration line (`origin/<default>`) so the fork catches up with its source, then phase (b) fast-forwards the running fleet onto the new integration tip.
+That merge runs off-primary in an isolated worktree and never touches the running checkout, so the fast-forward-only invariant on the primary is preserved.
+A plain upstream-origin firstmate has no such `upstream` remote, so phase (a) is skipped entirely and the run is unchanged - you will not see any `integrate-upstream` lines.
+
+Phase (a) reports one of these on the `integrate-upstream-status:` line:
+
+- `integrated` - a clean merge was pushed to the fork integration line; nothing more to do, phase (b) already fast-forwarded onto it.
+- `current` - the integration line already contained upstream; nothing to merge.
+- `conflict` - the merge conflicts and was NOT resolved in-line (this is deliberate).
+  An `integrate-upstream-delegate:` line follows naming the conflicted paths.
+  Dispatch an off-primary crewmate (a normal ship task on this firstmate repo, branch off `origin/<default>`) to merge `upstream/<default>` in, resolve the conflicts, and push the integration line, then re-run `/updatefirstmate` once its PR lands.
+  Load `firstmate-coding-guidelines` when briefing that crewmate, since it edits firstmate's own tracked material.
+  Tell the captain plainly that the fork needs a manual catch-up merge and that you are handling it off the running fleet.
+- `skipped` / `error` - phase (a) could not run (fetch failure, opt-out via `FM_UPDATE_NO_INTEGRATE`, or a push that was not a fast-forward); report the reason and re-run once resolved.
+
+Phase (b) runs after phase (a) regardless of its outcome, because it only ever fast-forwards the fleet onto whatever the integration line currently is.
+
 ## What it does
 
 1. **Run the updater:**
    ```sh
    bin/fm-update.sh
    ```
-   It fast-forwards this firstmate repo's default branch from origin, then fast-forwards every registered secondmate home (each a treehouse worktree of this same repo, leased at a detached HEAD on the default branch) the same way.
-   It prints one status line per target (`updated <old>..<new>` / `already current` / `skipped: <reason>`), followed by two action lines that tell you exactly what to do next:
+   Under the fork model it first integrates `upstream` into the fork integration line (see above), then fast-forwards this firstmate repo's default branch from origin, then fast-forwards every registered secondmate home (each a treehouse worktree of this same repo, leased at a detached HEAD on the default branch) the same way.
+   It prints one status line per target (`updated <old>..<new>` / `already current` / `skipped: <reason>`), followed by the action lines that tell you exactly what to do next:
+   - `integrate-upstream-status: ...` and, on a conflict, `integrate-upstream-delegate: ...` (fork model only)
    - `reread-firstmate: yes|no`
    - `nudge-secondmates: <window-targets...>|none`
 
