@@ -76,6 +76,82 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD wording avoids the apostrophe regression"
 }
 
+# The amendment contract exists so a fresh crew handed "amend this PR" cannot
+# anchor on the branch's already-finished-looking diff and declare done without
+# ever pushing (the misfire this scaffold flag fixes). Pin the loud deliverable
+# statement, both the PR URL and sha landing in the text, and that the standard
+# ship Setup/Definition-of-done sections are swapped out rather than merged in.
+test_amend_brief_renders_contract() {
+  local home id brief
+  home="$TMP_ROOT/amend-home"
+  id="brief-amend-c1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj \
+    --amend https://github.com/kunchenguid/firstmate/pull/999 --head deadbeef1234 \
+    >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "amend brief was not scaffolded"
+  assert_grep "# Amendment contract" "$brief" "amend brief missing the Amendment contract section"
+  assert_grep "THE ONLY DELIVERABLE IS A NEW PUSHED HEAD ON https://github.com/kunchenguid/firstmate/pull/999, DIFFERENT FROM deadbeef1234." "$brief" \
+    "amend brief missing the loud new-head statement"
+  assert_grep "deadbeef1234" "$brief" "amend brief lost the required head sha"
+  assert_grep "do NOT create a new \`fm/$id\` branch" "$brief" "amend brief must check out the existing PR branch, not create fm/<id>"
+  assert_no_grep "no-mistakes" "$brief" "amend brief should not carry the standard no-mistakes Definition of done"
+  assert_no_grep "EOF" "$brief" "amend brief leaked a heredoc EOF marker (unterminated heredoc)"
+  pass "fm-brief.sh: --amend renders the amendment contract with PR url and sha"
+}
+
+# --amend without --head (and --head without --amend) must refuse rather than
+# scaffold a brief with an unenforceable contract.
+test_amend_requires_head() {
+  local home
+  home="$TMP_ROOT/amend-missing-head-home"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" amend-missing-head some-proj --amend https://x/1 \
+    >/dev/null 2>&1
+  expect_code 1 "$?" "fm-brief.sh --amend without --head should refuse"
+  assert_absent "$home/data/amend-missing-head/brief.md" "--amend without --head must not scaffold a brief"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" head-without-amend some-proj --head deadbeef \
+    >/dev/null 2>&1
+  expect_code 1 "$?" "fm-brief.sh --head without --amend should refuse"
+  assert_absent "$home/data/head-without-amend/brief.md" "--head without --amend must not scaffold a brief"
+  pass "fm-brief.sh: --amend and --head are refused unless paired"
+}
+
+# --amend is a ship-only flag; combined with --scout or --secondmate it must
+# refuse instead of silently picking one contract over the other.
+test_amend_incompatible_with_scout_and_secondmate() {
+  local home
+  home="$TMP_ROOT/amend-incompatible-home"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" amend-scout some-proj --scout \
+    --amend https://x/1 --head deadbeef >/dev/null 2>&1
+  expect_code 1 "$?" "fm-brief.sh --amend with --scout should refuse"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" amend-second --secondmate some-proj \
+    --amend https://x/1 --head deadbeef >/dev/null 2>&1
+  expect_code 1 "$?" "fm-brief.sh --amend with --secondmate should refuse"
+  pass "fm-brief.sh: --amend refuses to combine with --scout/--secondmate"
+}
+
+# A non-amend call must be entirely unaffected: the standard ship contract
+# (branch-creation Setup, mode-specific Definition of done) stays intact and
+# no Amendment contract section leaks in.
+test_non_amend_calls_keep_standard_sections() {
+  local home id brief
+  home="$TMP_ROOT/non-amend-home"
+  id="brief-non-amend-d1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "non-amend brief was not scaffolded"
+  assert_grep "git checkout -b fm/$id" "$brief" "non-amend brief lost the standard new-branch Setup step"
+  assert_grep "# Definition of done" "$brief" "non-amend brief lost the standard Definition of done section"
+  assert_no_grep "# Amendment contract" "$brief" "non-amend brief must not carry the Amendment contract section"
+  pass "fm-brief.sh: a plain ship call keeps the standard Setup/Definition-of-done sections"
+}
+
 test_script_parses
 test_ship_modes_generate_clean_briefs
 test_no_mistakes_dod_wording
+test_amend_brief_renders_contract
+test_amend_requires_head
+test_amend_incompatible_with_scout_and_secondmate
+test_non_amend_calls_keep_standard_sections
