@@ -7,6 +7,7 @@
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
 # Usage: fm-brief.sh <task-id> <repo-name> [--scout | --fork-only]
+#        fm-brief.sh <task-id> <repo-name> --amend <pr-url> --head <sha>
 #        fm-brief.sh <task-id> --secondmate <project>...
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
@@ -15,6 +16,20 @@
 #   PR into the fork (not upstream) via bin/fm-fork-deliver.sh, and firstmate folds
 #   it. Use for changes that live only on the fork and are never upstreamed.
 #   See docs/fork-only-delivery.md.
+#   --amend <pr-url> --head <sha> writes the amendment contract instead: the
+#   deliverable is a NEW pushed head on the EXISTING PR <pr-url>, different from
+#   <sha>, not a new branch or PR. <sha> is a required parameter rather than a
+#   gh lookup performed by this script, because fm-brief.sh does no network I/O
+#   anywhere else - firstmate resolves it once, e.g. via `git ls-remote <remote>
+#   <branch>`, or `gh-axi pr checkout <number>` followed by `git rev-parse HEAD`,
+#   before scaffolding; the crew then checks out the existing PR branch with
+#   `gh-axi pr checkout <number>`, so same-repo and fork PRs both work. This exists
+#   because a fresh crew handed only "amend this PR" repeatedly read the
+#   branch's already-finished-looking diff and declared done without pushing
+#   anything; the contract now requires the crew to prove the remote head moved.
+#   Mode-agnostic: skips the delivery-mode lookup, since the only thing that
+#   matters is a new head on the branch that already exists. Incompatible with
+#   --scout/--secondmate/--fork-only.
 #   --secondmate writes a persistent secondmate charter. The project list
 #   is cloned into the secondmate home, while the natural-language scope
 #   tells the main firstmate when to route work there; routine churn stays in its own home;
@@ -29,10 +44,13 @@
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> captain merge
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                firstmate reviews, captain approves, firstmate merges to local main
-# Ship briefs begin with a worktree-isolation assertion before the branch step.
+# Ship briefs begin with a worktree-isolation assertion before the branch or PR checkout step.
 # Scout tasks ignore mode - their deliverable is a report, not a merge.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path.
+# PR-producing ship briefs (no-mistakes, direct-PR, fork-only) also carry the
+# PR-body Intent contract: the opening Intent/What section must be a scannable
+# tree, with long narrative collapsed at the bottom; this scaffold owns that contract.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -45,15 +63,47 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 KIND=ship
 FORK_ONLY=false
+AMEND_PR=
+AMEND_HEAD=
+AMEND_SET=0
+HEAD_SET=0
 POS=()
+want_value=
 for a in "$@"; do
+  if [ -n "$want_value" ]; then
+    case "$a" in
+      --*) echo "error: --$want_value requires a value" >&2; exit 1 ;;
+    esac
+    case "$want_value" in
+      amend) AMEND_PR=$a; AMEND_SET=1 ;;
+      head) AMEND_HEAD=$a; HEAD_SET=1 ;;
+      *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
+    esac
+    want_value=
+    continue
+  fi
   case "$a" in
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
     --fork-only) FORK_ONLY=true ;;
+    --amend) want_value=amend ;;
+    --amend=*) AMEND_PR=${a#--amend=}; AMEND_SET=1 ;;
+    --head) want_value="head" ;;
+    --head=*) AMEND_HEAD=${a#--head=}; HEAD_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
+[ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
+[ "$AMEND_SET" -eq 0 ] || [ -n "$AMEND_PR" ] || { echo "error: --amend requires a non-empty PR URL" >&2; exit 1; }
+[ "$HEAD_SET" -eq 0 ] || [ -n "$AMEND_HEAD" ] || { echo "error: --head requires a non-empty sha" >&2; exit 1; }
+if [ "$AMEND_SET" -eq 1 ]; then
+  [ "$KIND" = ship ] || { echo "error: --amend is incompatible with --scout/--secondmate" >&2; exit 1; }
+  ! "$FORK_ONLY" || { echo "error: --amend is incompatible with --fork-only" >&2; exit 1; }
+  [ "$HEAD_SET" -eq 1 ] || { echo "error: --amend requires --head <sha>" >&2; exit 1; }
+elif [ "$HEAD_SET" -eq 1 ]; then
+  echo "error: --head requires --amend" >&2
+  exit 1
+fi
 ID=${POS[0]}
 
 BRIEF="$DATA/$ID/brief.md"
@@ -134,6 +184,56 @@ exit 0
 fi
 
 REPO=${POS[1]}
+
+if [ "$AMEND_SET" -eq 1 ]; then
+cat > "$BRIEF" <<EOF
+You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
+
+# Task
+{TASK}
+
+# Amendment contract
+THE ONLY DELIVERABLE IS A NEW PUSHED HEAD ON $AMEND_PR, DIFFERENT FROM $AMEND_HEAD.
+This is not a new PR: $AMEND_PR already exists and its current head is $AMEND_HEAD.
+A finished-looking branch, a local commit, a passing test, or a written summary do NOT count as done.
+If the remote head of $AMEND_PR is still $AMEND_HEAD when you stop, you have not completed this task.
+
+# Setup
+You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
+
+**Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout firstmate operates from.
+The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
+If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not check out anything here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
+
+1. Check out the PR with \`gh-axi pr checkout <number>\`, where \`<number>\` is the trailing digits of \`$AMEND_PR\`; this works for same-repo and fork PRs alike.
+2. Verify the checked-out head is \`$AMEND_HEAD\`. If \`git rev-parse HEAD\` disagrees, someone already pushed a new head since this brief was written - append \`blocked: PR head moved to {actual sha}, expected $AMEND_HEAD\` to the status file and stop.
+3. Record the original head with \`git rev-parse HEAD\`; it must equal \`$AMEND_HEAD\`.
+4. Rebase policy: do not rebase onto the default branch and do not force-push unless the task above explicitly asks for it; add new commits on top of the existing head.
+
+# Rules
+1. Never push to the default branch, and never create a new branch for this work - push only to the existing PR branch you checked out in Setup. Never merge a PR.
+2. Stay inside this worktree; modify nothing outside it.
+3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+4. Report status by appending one line:
+   \`echo "{state}: {one short line}" >> $STATUS_FILE\`
+   States: working, needs-decision, blocked, done, failed.
+   Each append wakes firstmate, so report sparingly: only phase changes a supervisor
+   would act on (setup done, fix implemented, new head pushed) and the
+   needs-decision/blocked/done/failed states. No step-by-step FYI progress lines;
+   firstmate reads your pane for that.
+5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
+6. If a decision belongs to a human (product choices, destructive actions, ask-user findings),
+   append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
+
+# Definition of done
+Implement the requested change as new commits on top of the branch you checked out, then push to the SAME branch for $AMEND_PR - no new branch, no new PR.
+Before reporting done, confirm \`git rev-parse HEAD\` differs from $AMEND_HEAD after your successful push.
+A local commit that was never pushed is NOT done - the deliverable is a new pushed head, not a commit.
+When the new head is pushed and confirmed different from $AMEND_HEAD, append \`done: PR $AMEND_PR new head {sha}\` to the status file and stop.
+EOF
+echo "scaffolded: $BRIEF (ship, amend $AMEND_PR from $AMEND_HEAD)"
+exit 0
+fi
 
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
@@ -256,6 +356,26 @@ EOF
 )
     ;;
 esac
+
+# PR-producing modes (no-mistakes, direct-PR, fork-only) carry the PR-body
+# Intent contract; local-only has no PR. Same $(cat <<EOF) apostrophe hazard as
+# the DOD blocks above.
+if [ "$MODE" != local-only ]; then
+PRBODY=$(cat <<EOF
+# PR body
+When you write or edit the PR body - the \`--body-file\` content for fork-only, or via \`gh-axi pr edit\` once a no-mistakes/direct-PR PR exists - keep its opening \`## Intent\` (or \`## What\`) section a scannable tree, not a prose wall.
+- Top-level bullets: the issue or issues addressed, with evidence numbers only where they genuinely matter to a reviewer.
+- Sub-bullets: the fix approach, implications (behavior changes, operational notes, deploy requirements), and explicit scope boundaries (what was deliberately NOT done).
+- Typically 3-8 top-level bullets, nested 2-3 levels max; let the shape flex with the change type (bug fix: issue -> root cause -> fix -> implication; feature: goal -> approach -> limits; ops: what -> why -> blast radius), never a rigid template.
+Long-form narrative or the original task prompt may appear only at the BOTTOM of the body, collapsed inside \`<details><summary>Full narrative / original brief</summary>...</details>\`, never at the top.
+Keep the other body sections (What Changed, Risk Assessment, Testing, evidence details) intact.
+These rules apply where we own the PR template; a repo with its own strict upstream PR template wins - follow that template, and keep the description concise and human: explain why and toward what goal, not a line-by-line tour of the diff (the reviewer reads the code).
+EOF
+)
+DOD="$PRBODY
+
+$DOD"
+fi
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
