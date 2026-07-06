@@ -78,6 +78,7 @@ Ship briefs also tell the crewmate to verify `pwd -P` and `git rev-parse --show-
 ## Two task shapes
 
 Ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`, or `local-only`); scout tasks investigate, plan, reproduce bugs, or audit, then leave a report at `data/<id>/report.md` and never push.
+For PR-producing ship modes (`no-mistakes` and `direct-PR`), generated briefs also require a scannable opening PR-body Intent/What section and move long narrative to a collapsed block at the bottom.
 
 ## Dispatch profiles
 
