@@ -39,7 +39,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-BIND = os.environ.get("CSHOOK_BIND", "127.0.0.1")
+BIND = os.environ.get("CSHOOK_BIND", "0.0.0.0")
 try:
     PORT = int(os.environ.get("CSHOOK_PORT", "8092"))
 except ValueError:
