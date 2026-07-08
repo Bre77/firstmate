@@ -233,6 +233,51 @@ test_non_amend_calls_keep_standard_sections() {
   pass "fm-brief.sh: a plain ship call keeps the standard Setup/Definition-of-done sections"
 }
 
+# The Code comments contract rides EVERY ship brief regardless of delivery
+# mode (a shipped comment is a shipped comment whether or not it lands via a
+# PR), so pin the banned-pattern list, the AGENTS.md/ARCHITECTURE.md
+# exception, and the terseness bar across all four modes. The
+# never-ride-your-PR line is scoped narrower - it lives in the PR body
+# section, so it must appear only on PR-producing modes and be absent from
+# local-only, mirroring test_pr_body_contract_by_mode's mode split.
+test_code_comments_contract() {
+  local home brief
+
+  home="$TMP_ROOT/code-comments-home"
+  write_registry "$home"
+
+  for id_proj in "brief-comments-nm-e1:no-registry-proj" "brief-comments-dp-e2:direct-proj" "brief-comments-lo-e3:local-proj"; do
+    id=${id_proj%%:*}
+    proj=${id_proj##*:}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$id: brief was not scaffolded"
+    assert_grep "# Code comments" "$brief" "$id: brief missing the Code comments section"
+    assert_grep "see docs/..." "$brief" "$id: code-comment contract lost the banned docs/... pointer pattern"
+    assert_grep "\`docs/plans\` references" "$brief" "$id: code-comment contract lost the docs/plans-references ban"
+    assert_grep "PR numbers (\`#123\`)" "$brief" "$id: code-comment contract lost the PR-number ban"
+    assert_grep "AGENTS.md\` or \`ARCHITECTURE.md\` is fine" "$brief" \
+      "$id: code-comment contract lost the project AGENTS.md/ARCHITECTURE.md exception"
+    assert_grep "longer than about 3 lines" "$brief" "$id: code-comment contract lost the terseness bar"
+  done
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-comments-fo-e4 direct-proj --fork-only >/dev/null 2>&1
+  brief="$home/data/brief-comments-fo-e4/brief.md"
+  assert_present "$brief" "fork-only: brief was not scaffolded"
+  assert_grep "# Code comments" "$brief" "fork-only brief missing the Code comments section"
+
+  for id in brief-comments-nm-e1 brief-comments-dp-e2 brief-comments-fo-e4; do
+    brief="$home/data/$id/brief.md"
+    assert_grep "never ride your PR" "$brief" \
+      "$id: PR-producing brief lost the internal-planning-docs-never-ride-your-PR line"
+  done
+  brief="$home/data/brief-comments-lo-e3/brief.md"
+  assert_no_grep "never ride your PR" "$brief" \
+    "local-only brief must not carry the never-ride-your-PR line (it has no PR)"
+
+  pass "fm-brief.sh: Code comments contract present on every ship mode, PR-riding rule scoped to PR-producing modes"
+}
+
 test_script_parses
 test_ship_modes_generate_clean_briefs
 test_no_mistakes_dod_wording
@@ -242,3 +287,4 @@ test_amend_brief_renders_contract
 test_amend_requires_head
 test_amend_incompatible_with_other_kinds
 test_non_amend_calls_keep_standard_sections
+test_code_comments_contract
