@@ -4,10 +4,10 @@
 # Two layers:
 #   PREDICATE  - bin/fm-supervision-lib.sh, the shared beacon/status computation
 #                used by fm-guard.sh and by the hook's banner details.
-#   HOOK       - bin/fm-turnend-guard.sh, the Claude Code Stop hook that scopes
-#                in-flight work to the PRIMARY checkout only and requires a live,
-#                identity-matched watcher lock plus a fresh beacon.
-# All hermetic over temp dirs; no real Claude Code session is invoked.
+#   HOOK       - bin/fm-turnend-guard.sh, the shared primary hook predicate that
+#                scopes in-flight work to the PRIMARY checkout only and requires
+#                a live, identity-matched watcher lock plus a fresh beacon.
+# All hermetic over temp dirs; no real agent session is invoked.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -87,9 +87,16 @@ install_guard_scripts() {
   local dir=$1
   mkdir -p "$dir/bin"
   cp "$ROOT/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard.sh"
+  cp "$ROOT/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-turnend-guard-grok.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
-  chmod +x "$dir/bin/fm-turnend-guard.sh"
+  chmod +x "$dir/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard-grok.sh"
+}
+
+mark_codex_hook_root() {
+  local dir=$1
+  mkdir -p "$dir/.codex"
+  printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"fm-turnend-guard.sh"}]}]}}\n' > "$dir/.codex/hooks.json"
 }
 
 # A primary-shaped checkout: plain (non-worktree) git repo, AGENTS.md, bin/,
@@ -346,6 +353,55 @@ test_hook_runs_fast() {
   pass "fm-turnend-guard: runs well under the generous timing margin (${elapsed_s}s)"
 }
 
+test_grok_adapter_forces_one_resume_when_unhealthy() {
+  local dir fakebin log out status
+  dir=$(make_primary_dir "$TMP_ROOT/grok-adapter-block")
+  : > "$dir/state/task1.meta"
+  fakebin=$(fm_fakebin "$TMP_ROOT/grok-adapter-fakebin")
+  log="$TMP_ROOT/grok-adapter-call.log"
+  cat > "$fakebin/grok" <<EOF
+#!/usr/bin/env bash
+{
+  printf 'active=%s\n' "\${GROK_TURNEND_GUARD_ACTIVE:-}"
+  printf 'home=%s\n' "\${GROK_HOME:-}"
+  printf 'args:'
+  for arg in "\$@"; do
+    printf ' <%s>' "\$arg"
+  done
+  printf '\n'
+} >> "$log"
+EOF
+  chmod +x "$fakebin/grok"
+  out=$(printf '{"sessionId":"session-test","hookEventName":"stop"}' | PATH="$fakebin:$PATH" GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
+  expect_code 0 "$status" "grok adapter must fail open after queuing a forced resume"
+  [ -z "$out" ] || fail "grok adapter printed output: $out"
+  assert_contains "$(cat "$log")" 'active=1' "grok adapter must mark its forced resume as loop-guarded"
+  assert_contains "$(cat "$log")" '<--resume>' "grok adapter must resume the current session"
+  assert_contains "$(cat "$log")" '<session-test>' "grok adapter must pass the hook session id"
+  assert_not_contains "$(cat "$log")" '<--permission-mode>' "grok adapter must not add a stronger permission mode"
+  assert_not_contains "$(cat "$log")" '<bypassPermissions>' "grok adapter must not bypass permissions on forced resume"
+  assert_contains "$(cat "$log")" 'TURN WOULD END BLIND' "grok adapter must carry the guard reason into the forced resume"
+  pass "fm-turnend-guard-grok: forces one same-session resume when the shared predicate blocks"
+}
+
+test_grok_adapter_loop_guard_skips_resume() {
+  local dir fakebin log out status
+  dir=$(make_primary_dir "$TMP_ROOT/grok-adapter-loop")
+  : > "$dir/state/task1.meta"
+  fakebin=$(fm_fakebin "$TMP_ROOT/grok-adapter-loop-fakebin")
+  log="$TMP_ROOT/grok-adapter-loop-call.log"
+  cat > "$fakebin/grok" <<EOF
+#!/usr/bin/env bash
+printf 'called\n' >> "$log"
+EOF
+  chmod +x "$fakebin/grok"
+  out=$(printf '{"sessionId":"session-test","hookEventName":"stop"}' | PATH="$fakebin:$PATH" GROK_WORKSPACE_ROOT="$dir" GROK_TURNEND_GUARD_ACTIVE=1 bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
+  expect_code 0 "$status" "grok adapter must allow its own forced resume turn to end"
+  [ -z "$out" ] || fail "grok adapter printed output while loop-guarded: $out"
+  [ ! -e "$log" ] || fail "grok adapter spawned another resume while loop-guarded: $(cat "$log")"
+  pass "fm-turnend-guard-grok: loop guard prevents a nested resume loop"
+}
+
 test_settings_hook_uses_claude_project_dir() {
   local settings command
   settings="$ROOT/.claude/settings.json"
@@ -360,6 +416,163 @@ test_settings_hook_uses_claude_project_dir() {
       ;;
   esac
   pass ".claude/settings.json: Stop hook uses CLAUDE_PROJECT_DIR-anchored command"
+}
+
+test_codex_hook_invokes_shared_guard() {
+  local settings command
+  settings="$ROOT/.codex/hooks.json"
+  [ -f "$settings" ] || fail "tracked .codex/hooks.json is missing"
+  command=$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$settings")
+  [ -n "$command" ] || fail "Stop hook command is missing from .codex/hooks.json"
+  assert_contains "$command" 'pwd -P' "codex hook must anchor from the hook process working directory"
+  assert_contains "$command" '.codex/hooks.json' "codex hook must verify the hook-loaded firstmate root"
+  assert_contains "$command" 'fm-turnend-guard.sh' "codex hook must invoke the shared guard"
+  assert_not_contains "$command" '.cwd' "codex hook must not use payload cwd to select the guard executable"
+  pass ".codex/hooks.json: Stop hook invokes the shared primary guard"
+}
+
+test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root() {
+  local settings command dir expected_root outside payload out status
+  settings="$ROOT/.codex/hooks.json"
+  [ -f "$settings" ] || fail "tracked .codex/hooks.json is missing"
+  command=$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$settings")
+  [ -n "$command" ] || fail "Stop hook command is missing from .codex/hooks.json"
+  dir=$(make_primary_dir "$TMP_ROOT/codex-hook-root")
+  mark_codex_hook_root "$dir"
+  expected_root=$(cd "$dir" && pwd -P)
+  outside="$TMP_ROOT/codex-hook-outside"
+  mkdir -p "$outside"
+  cat > "$dir/bin/fm-turnend-guard.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'guard=%s\n' "$0"
+cat
+EOF
+  chmod +x "$dir/bin/fm-turnend-guard.sh"
+  payload=$(jq -cn --arg cwd "$outside" '{cwd:$cwd,stop_hook_active:false}')
+  out=$(printf '%s' "$payload" | (cd "$dir" && bash -c "$command") 2>&1); status=$?
+  expect_code 0 "$status" "codex hook must execute successfully when payload cwd is outside the firstmate root"
+  assert_contains "$out" "guard=$expected_root/bin/fm-turnend-guard.sh" "codex hook must use the hook process root"
+  assert_contains "$out" "$payload" "codex hook must pass the original payload to the guard"
+  pass ".codex/hooks.json: Stop hook uses hook process root when payload cwd is outside"
+}
+
+test_codex_hook_ignores_nested_git_root_guard() {
+  local settings command dir nested subdir expected_root payload out status
+  settings="$ROOT/.codex/hooks.json"
+  [ -f "$settings" ] || fail "tracked .codex/hooks.json is missing"
+  command=$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$settings")
+  [ -n "$command" ] || fail "Stop hook command is missing from .codex/hooks.json"
+  dir=$(make_primary_dir "$TMP_ROOT/codex-hook-outer")
+  mark_codex_hook_root "$dir"
+  expected_root=$(cd "$dir" && pwd -P)
+  nested="$dir/projects/other"
+  mkdir -p "$nested"
+  git init -q "$nested"
+  git -C "$nested" commit -q --allow-empty -m init
+  mkdir -p "$nested/bin" "$nested/.codex"
+  : > "$nested/AGENTS.md"
+  printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"fm-turnend-guard.sh"}]}]}}\n' > "$nested/.codex/hooks.json"
+  cat > "$nested/bin/fm-turnend-guard.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'nested guard executed\n'
+exit 99
+EOF
+  chmod +x "$nested/bin/fm-turnend-guard.sh"
+  cat > "$dir/bin/fm-turnend-guard.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'guard=%s\n' "$0"
+cat
+EOF
+  chmod +x "$dir/bin/fm-turnend-guard.sh"
+  subdir="$nested/deep/path"
+  mkdir -p "$subdir"
+  payload=$(jq -cn --arg cwd "$subdir" '{cwd:$cwd,stop_hook_active:false}')
+  out=$(printf '%s' "$payload" | (cd "$dir" && bash -c "$command") 2>&1); status=$?
+  expect_code 0 "$status" "codex hook must not execute a nested project guard"
+  assert_contains "$out" "guard=$expected_root/bin/fm-turnend-guard.sh" "codex hook must keep using the outer firstmate guard"
+  assert_not_contains "$out" "nested guard executed" "codex hook must not execute nested project code"
+  pass ".codex/hooks.json: Stop hook ignores nested git root guard scripts"
+}
+
+test_opencode_plugin_forces_followup() {
+  local plugin content
+  plugin="$ROOT/.opencode/plugins/fm-primary-turnend-guard.js"
+  [ -f "$plugin" ] || fail "tracked OpenCode primary plugin is missing"
+  content=$(cat "$plugin")
+  assert_contains "$content" 'session.idle' "OpenCode plugin must run on session.idle"
+  assert_contains "$content" 'fm-turnend-guard.sh' "OpenCode plugin must invoke the shared guard"
+  assert_contains "$content" 'promptAsync' "OpenCode plugin must force a follow-up turn"
+  assert_contains "$content" 'skipNextIdle' "OpenCode plugin must carry a loop guard"
+  assert_contains "$content" 'worktree' "OpenCode plugin must anchor the guard from the git worktree path"
+  pass ".opencode primary plugin: session.idle forces one follow-up through the shared guard"
+}
+
+test_opencode_plugin_anchors_guard_to_worktree() {
+  local plugin worktree_dir wrong_dir out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-turnend-guard.js"
+  [ -f "$plugin" ] || fail "tracked OpenCode primary plugin is missing"
+  worktree_dir="$TMP_ROOT/opencode-plugin-worktree"
+  wrong_dir="$TMP_ROOT/opencode-plugin-cwd/subdir"
+  mkdir -p "$worktree_dir/bin" "$wrong_dir"
+  cat > "$worktree_dir/bin/fm-turnend-guard.sh" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'guard-fired\n' >&2
+exit 2
+EOF
+  chmod +x "$worktree_dir/bin/fm-turnend-guard.sh"
+  out=$(PLUGIN="$plugin" DIRECTORY="$wrong_dir" WORKTREE="$worktree_dir" node 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+let promptBody = "";
+const client = {
+  session: {
+    promptAsync: async (request) => {
+      promptBody = request.body.parts[0].text;
+    },
+  },
+};
+const hooks = await mod.FmPrimaryTurnendGuard({
+  client,
+  directory: process.env.DIRECTORY,
+  worktree: process.env.WORKTREE,
+});
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+if (!promptBody.includes("guard-fired")) {
+  console.error(`missing prompt body: ${promptBody}`);
+  process.exit(1);
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode plugin must run the guard from worktree even when directory is elsewhere"
+  [ -z "$out" ] || fail "OpenCode plugin worktree-root test printed output: $out"
+  pass ".opencode primary plugin: guard path is anchored to worktree, not directory"
+}
+
+test_pi_extension_forces_followup() {
+  local ext content
+  ext="$ROOT/.pi/extensions/fm-primary-turnend-guard.ts"
+  [ -f "$ext" ] || fail "tracked pi primary extension is missing"
+  content=$(cat "$ext")
+  assert_contains "$content" 'turn_end' "pi extension must run on turn_end"
+  assert_contains "$content" 'fm-turnend-guard.sh' "pi extension must invoke the shared guard"
+  assert_contains "$content" 'sendUserMessage' "pi extension must force a follow-up turn"
+  assert_contains "$content" 'deliverAs: "followUp"' "pi extension must queue the follow-up safely"
+  assert_contains "$content" 'skipNextTurnEnd' "pi extension must carry a loop guard"
+  pass ".pi primary extension: turn_end forces one follow-up through the shared guard"
+}
+
+test_grok_hook_invokes_adapter() {
+  local settings command
+  settings="$ROOT/.grok/hooks/fm-primary-turnend-guard.json"
+  [ -f "$settings" ] || fail "tracked grok primary hook config is missing"
+  command=$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$settings")
+  [ -n "$command" ] || fail "Stop hook command is missing from grok primary hook config"
+  assert_contains "$command" 'GROK_WORKSPACE_ROOT' "grok hook must anchor from GROK_WORKSPACE_ROOT"
+  assert_contains "$command" 'fm-turnend-guard-grok.sh' "grok hook must invoke the adapter"
+  pass ".grok primary hook: Stop hook invokes the grok adapter"
 }
 
 test_predicate_healthy_no_inflight
@@ -382,4 +595,13 @@ test_hook_silent_in_crewmate_worktree
 test_hook_silent_without_jq
 test_hook_silent_without_stdin
 test_hook_runs_fast
+test_grok_adapter_forces_one_resume_when_unhealthy
+test_grok_adapter_loop_guard_skips_resume
 test_settings_hook_uses_claude_project_dir
+test_codex_hook_invokes_shared_guard
+test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root
+test_codex_hook_ignores_nested_git_root_guard
+test_opencode_plugin_forces_followup
+test_opencode_plugin_anchors_guard_to_worktree
+test_pi_extension_forces_followup
+test_grok_hook_invokes_adapter
