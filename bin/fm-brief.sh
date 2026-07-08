@@ -51,6 +51,11 @@
 # PR-producing ship briefs (no-mistakes, direct-PR, fork-only) also carry the
 # PR-body Intent contract: the opening Intent/What section must be a scannable
 # tree, with long narrative collapsed at the bottom; this scaffold owns that contract.
+# Every ship brief also carries a Code comments contract: a banned-pattern list
+# (no docs/plans, design-doc, PR-number, or report pointers in shipped code),
+# a terseness bar, and, on PR-producing briefs, a rule against internal
+# planning docs riding the PR; this scaffold is the one place that contract
+# is stated in full.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -370,6 +375,7 @@ When you write or edit the PR body - the \`--body-file\` content for fork-only, 
 Long-form narrative or the original task prompt may appear only at the BOTTOM of the body, collapsed inside \`<details><summary>Full narrative / original brief</summary>...</details>\`, never at the top.
 Keep the other body sections (What Changed, Risk Assessment, Testing, evidence details) intact.
 These rules apply where we own the PR template; a repo with its own strict upstream PR template wins - follow that template, and keep the description concise and human: explain why and toward what goal, not a line-by-line tour of the diff (the reviewer reads the code).
+Internal planning or brainstorm docs, such as a \`docs/plans/*\` WIP file, never ride your PR: leave them out of the diff entirely.
 EOF
 )
 DOD="$PRBODY
@@ -406,6 +412,12 @@ $RULE1
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions, ask-user findings),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
+
+# Code comments
+A shipped code comment states ONE constraint - the WHY - in isolation. Not history, not narrative, not a cross-reference trail.
+Banned in a shipped code comment: \`see <file>.md\` / \`see docs/...\` pointers, \`docs/plans\` references, design-doc pointers, PR numbers (\`#123\`), report/investigation/audit/RCA references, and \`data/<task>/\` or firstmate task-id references.
+The one exception: a pointer to the project's own \`AGENTS.md\` or \`ARCHITECTURE.md\` is fine - those are the right home for history, rationale, and cross-references, a code comment is not.
+Keep it terse: a comment longer than about 3 lines that narrates instead of stating a single constraint does not belong in shipped code - cut it or move the detail to \`AGENTS.md\`.
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
