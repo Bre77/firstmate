@@ -56,6 +56,23 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   Per-crew memory cap: every ship/scout AGENT launch is wrapped in a systemd
+#   --user transient scope (--slice=firstmate-crew.slice) so the agent and
+#   every child process it spawns (lint workers, build subprocesses, ...) share
+#   one bounded cgroup - a runaway crew (e.g. a repo-wide lint ballooning to
+#   tens of GB) dies inside its own cgroup instead of taking down the host.
+#   MemoryHigh soft-throttles under reclaim (the crew slows, it does not die);
+#   MemoryMax is a hard ceiling that OOM-kills WITHIN that cgroup; MemorySwapMax
+#   stops a crew thrashing the box into swap. Defaults MemoryHigh=8G,
+#   MemoryMax=12G, MemorySwapMax=2G;
+#   override per spawn with FM_CREW_MEMORY_HIGH / FM_CREW_MEMORY_MAX /
+#   FM_CREW_MEMORY_SWAP env vars (see --help). Falls back to an unwrapped
+#   launch, with a stderr warning, when this host has no reachable
+#   `systemd-run --user` (no user systemd instance) - the cap never blocks a
+#   spawn. Applies to KIND=ship and KIND=scout only; a --secondmate AGENT
+#   (the persistent supervisor process itself) is not wrapped, though every
+#   crewmate IT spawns goes through this same fm-spawn.sh path and is capped
+#   identically. See docs/crew-memory-cap.md for the empirical verification.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -86,6 +103,18 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 SUB_HOME_MARKER=".fm-secondmate-home"
+
+usage() {
+  # Print the header comment block above (through `set -eu`) verbatim, the
+  # same convention fm-fork-deliver.sh's usage() uses for its own header.
+  awk '/^#!/{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "${BASH_SOURCE[0]}" >&2
+}
+for _fm_spawn_help_arg in "$@"; do
+  case "$_fm_spawn_help_arg" in
+    -h|--help) usage; exit 0 ;;
+  esac
+done
+unset _fm_spawn_help_arg
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh
@@ -409,6 +438,38 @@ shell_quote() {
   printf "'"
   printf '%s' "$1" | sed "s/'/'\\\\''/g"
   printf "'"
+}
+
+# Per-crew memory cap (see the header comment for the full rationale and
+# docs/crew-memory-cap.md for the empirical verification behind these
+# defaults). Overridable per spawn so a caller can raise/lower the cap for an
+# unusually large or small task without touching the script.
+FM_CREW_MEMORY_HIGH="${FM_CREW_MEMORY_HIGH:-8G}"
+FM_CREW_MEMORY_MAX="${FM_CREW_MEMORY_MAX:-12G}"
+FM_CREW_MEMORY_SWAP="${FM_CREW_MEMORY_SWAP:-2G}"
+
+# crew_memory_cap_available: true if this host can actually run a systemd
+# --user transient scope right now. Exercises the exact mechanism a real spawn
+# uses (not just `command -v`), so a present-but-unusable systemd-run (no user
+# instance/D-Bus session reachable) is caught the same way. Cheap and silent:
+# the trial scope holds a `true` process and is removed the instant it exits.
+crew_memory_cap_available() {
+  command -v systemd-run >/dev/null 2>&1 || return 1
+  systemd-run --user --scope --quiet -- true >/dev/null 2>&1
+}
+
+# wrap_launch_with_memory_cap <launch>: prefix <launch> with a systemd --user
+# transient scope carrying the memory properties, so the harness process AND
+# every child it spawns land in one bounded cgroup. <launch> is itself a shell
+# command line (env-var assignments, `$(cat ...)` substitutions, quoting) that
+# the pane's own shell is expected to interpret, so it cannot be handed to
+# systemd-run's `--` as a literal argv (that execs directly, no shell). Instead
+# it is re-quoted whole and run via `bash -c`, which preserves that shell
+# semantics inside the capped scope.
+wrap_launch_with_memory_cap() {
+  local launch=$1
+  printf 'systemd-run --user --scope --slice=firstmate-crew.slice -p MemoryHigh=%s -p MemoryMax=%s -p MemorySwapMax=%s -- bash -c %s' \
+    "$FM_CREW_MEMORY_HIGH" "$FM_CREW_MEMORY_MAX" "$FM_CREW_MEMORY_SWAP" "$(shell_quote "$launch")"
 }
 
 model_flag_for_harness() {
@@ -988,6 +1049,16 @@ LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
+else
+  # Per-crew memory cap (header comment; docs/crew-memory-cap.md). Only
+  # ship/scout AGENT launches are wrapped - a secondmate AGENT is the
+  # persistent supervisor process itself, handled in the branch above, though
+  # every crewmate it spawns still goes through this same else branch.
+  if crew_memory_cap_available; then
+    LAUNCH=$(wrap_launch_with_memory_cap "$LAUNCH")
+  else
+    echo "warning: systemd-run --user is unavailable on this host (no reachable user systemd instance); launching $ID without a per-crew memory cap" >&2
+  fi
 fi
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
