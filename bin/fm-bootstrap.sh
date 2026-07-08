@@ -55,7 +55,12 @@
 #          the relay poll shim and 30s cadence config, and prints an FMX line.
 #          Fleet sync fetches, fast-forwards safe default-branch states, reports
 #          recovered and STUCK clone drift, and prunes gone local branches; it is
-#          bounded by FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT, default 20s.
+#          bounded by FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT when it is a non-empty
+#          numeric override, while non-numeric values fall back to 20s.
+#          When the override is unset or blank, the timeout is
+#          max(20, 5 + 3 * origin-backed project clone count). A timed-out
+#          refresh relays any completed fm-fleet-sync.sh output before the
+#          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
 #          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the four MUTATING sweeps
 #          (secondmate_sync, secondmate_liveness_sweep, x_mode_setup,
@@ -77,49 +82,52 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
-# shellcheck source=bin/fm-tasks-axi-lib.sh
+# shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
-# shellcheck source=bin/fm-tangle-lib.sh
+# shellcheck source=bin/fm-tangle-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tangle-lib.sh"
-# shellcheck source=bin/fm-ff-lib.sh
+# shellcheck source=bin/fm-ff-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-ff-lib.sh"
-# shellcheck source=bin/fm-config-inherit-lib.sh
+# shellcheck source=bin/fm-config-inherit-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
-# shellcheck source=bin/fm-x-lib.sh
+# shellcheck source=bin/fm-x-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-x-lib.sh"
-# shellcheck source=bin/fm-clickstack-lib.sh
+# shellcheck source=bin/fm-clickstack-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-clickstack-lib.sh"
-# shellcheck source=bin/fm-backend.sh
+# shellcheck source=bin/fm-backend.sh disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
 
-fleet_sync() {
-  [ -x "$FM_ROOT/bin/fm-fleet-sync.sh" ] || return 0
-  [ -d "$PROJECTS" ] || return 0
-
-  tmp=$(mktemp "${TMPDIR:-/tmp}/fm-fleet-sync.XXXXXX" 2>/dev/null) || return 0
-  monitor_was_on=0
-  case $- in *m*) monitor_was_on=1 ;; esac
-  set -m 2>/dev/null || true
-  "$FM_ROOT/bin/fm-fleet-sync.sh" >"$tmp" 2>/dev/null &
-  pid=$!
-
-  timeout=${FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT:-20}
-  case "$timeout" in ''|*[!0-9]*) timeout=20 ;; esac
-  start=$SECONDS
-  while jobs -r -p | grep -qx "$pid"; do
-    if [ $((SECONDS - start)) -ge "$timeout" ]; then
-      kill -TERM "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
-      wait "$pid" 2>/dev/null || true
-      [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
-      echo "FLEET_SYNC: fleet: skipped: bootstrap refresh timed out"
-      rm -f "$tmp"
-      return 0
-    fi
-    sleep 1
+fleet_sync_origin_backed_project_count() {
+  local count proj
+  count=0
+  [ -d "$PROJECTS" ] || { echo 0; return 0; }
+  for proj in "$PROJECTS"/*; do
+    [ -d "$proj" ] || continue
+    git -C "$proj" rev-parse --git-dir >/dev/null 2>&1 || continue
+    git -C "$proj" remote get-url origin >/dev/null 2>&1 || continue
+    count=$((count + 1))
   done
-  wait "$pid" 2>/dev/null || true
-  [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
+  echo "$count"
+}
 
+fleet_sync_bootstrap_timeout() {
+  local count timeout
+  if [ -n "${FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT:-}" ]; then
+    case "$FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT" in
+      *[!0-9]*) echo 20 ;;
+      *) echo "$FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT" ;;
+    esac
+    return 0
+  fi
+
+  count=$(fleet_sync_origin_backed_project_count)
+  timeout=$((5 + (3 * count)))
+  [ "$timeout" -ge 20 ] || timeout=20
+  echo "$timeout"
+}
+
+fleet_sync_relay_filtered_output() {
+  local tmp=$1 line
   while IFS= read -r line; do
     case "$line" in
       *': skipped: local-only project') ;;
@@ -129,6 +137,46 @@ fleet_sync() {
       *': recovered:'*) echo "FLEET_SYNC: $line" ;;
     esac
   done < "$tmp"
+}
+
+fleet_sync_relay_all_output() {
+  local tmp=$1 line
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    echo "FLEET_SYNC: $line"
+  done < "$tmp"
+}
+
+fleet_sync() {
+  [ -x "$FM_ROOT/bin/fm-fleet-sync.sh" ] || return 0
+  [ -d "$PROJECTS" ] || return 0
+
+  tmp=$(mktemp "${TMPDIR:-/tmp}/fm-fleet-sync.XXXXXX" 2>/dev/null) || return 0
+  timeout=$(fleet_sync_bootstrap_timeout)
+  monitor_was_on=0
+  case $- in *m*) monitor_was_on=1 ;; esac
+  set -m 2>/dev/null || true
+  "$FM_ROOT/bin/fm-fleet-sync.sh" >"$tmp" 2>/dev/null &
+  pid=$!
+
+  start=$SECONDS
+  while jobs -r -p | grep -qx "$pid"; do
+    elapsed=$((SECONDS - start))
+    if [ "$elapsed" -ge "$timeout" ]; then
+      kill -TERM "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
+      fleet_sync_relay_all_output "$tmp"
+      echo "FLEET_SYNC: fleet: skipped: bootstrap refresh timed out (timeout=${timeout}s elapsed=${elapsed}s)"
+      rm -f "$tmp"
+      return 0
+    fi
+    sleep 1
+  done
+  wait "$pid" 2>/dev/null || true
+  [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
+
+  fleet_sync_relay_filtered_output "$tmp"
   rm -f "$tmp"
 }
 
