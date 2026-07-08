@@ -4,10 +4,17 @@
 # Pooled project clones do not keep their local default branch current, so this
 # helper compares remote-backed projects against origin/<default> after fetching
 # the default branch, and local-only projects against the local default branch.
+# A fork-only task (state/<id>.meta records mode=fork-only; see
+# docs/fork-only-delivery.md) branched off the fork remote's default instead of
+# origin's, so its base is fork/<default>: origin for a fork-only project (e.g.
+# firstmate-fork) is the UPSTREAM repo, unrelated to the fork the task actually
+# branched from, so comparing against origin/<default> there would show the
+# fork's entire upstream delta instead of just the task's change.
 # When state/<id>.meta records pr= for an open PR, the compare side is the PR
-# head (recorded pr_head= when reachable, else refs/pull/<n>/head) so review
-# stays current after no-mistakes fix rounds push to the PR; if the PR head
-# cannot be resolved, the script falls back to the local branch with a warning.
+# head (recorded pr_head= when reachable, else refs/pull/<n>/head fetched from
+# the same remote as the base - origin normally, fork for a fork-only task) so
+# review stays current after fix rounds push to the PR; if the PR head cannot
+# be resolved, the script falls back to the local branch with a warning.
 # Usage: fm-review-diff.sh <task-id> [--stat]
 #   --stat prints only the stat summary; default prints stat summary plus full diff.
 set -eu
@@ -42,10 +49,14 @@ META="$STATE/$ID.meta"
 
 WT=$(grep '^worktree=' "$META" | cut -d= -f2-)
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
+MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
 [ -n "$WT" ] || { echo "error: meta for task $ID is missing worktree=" >&2; exit 1; }
 [ -n "$PROJ" ] || { echo "error: meta for task $ID is missing project=" >&2; exit 1; }
 [ -d "$WT" ] || { echo "error: worktree for task $ID is missing: $WT" >&2; exit 1; }
 [ -d "$PROJ" ] || { echo "error: project for task $ID is missing: $PROJ" >&2; exit 1; }
+
+FORK_ONLY=false
+[ "$MODE" = "fork-only" ] && FORK_ONLY=true
 
 default_branch() {
   local ref branch
@@ -63,7 +74,33 @@ default_branch() {
   return 1
 }
 
-DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
+# Mirrors bin/fm-fork-deliver.sh's fork_default_branch: resolve the fork
+# remote's own default branch, falling back to "main" since every fork-only
+# task branches off fork/main by contract (bin/fm-brief.sh --fork-only).
+fork_default_branch() {
+  local ref branch
+  ref=$(git -C "$PROJ" symbolic-ref --quiet --short refs/remotes/fork/HEAD 2>/dev/null || true)
+  if [ -n "$ref" ]; then
+    echo "${ref#fork/}"
+    return 0
+  fi
+  for branch in main master; do
+    if git -C "$PROJ" show-ref --verify --quiet "refs/remotes/fork/$branch"; then
+      echo "$branch"
+      return 0
+    fi
+  done
+  echo main
+}
+
+if "$FORK_ONLY"; then
+  git -C "$PROJ" remote get-url fork >/dev/null 2>&1 || { echo "error: task $ID is fork-only but $PROJ has no 'fork' remote" >&2; exit 1; }
+  DEFAULT=$(fork_default_branch)
+  BASE_REMOTE=fork
+else
+  DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
+  BASE_REMOTE=origin
+fi
 
 BRANCH="fm/$ID"
 if ! git -C "$WT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null; then
@@ -90,15 +127,15 @@ pr_number_from_target() {
 }
 
 resolve_pr_head() {
-  local pr_url=$1 recorded_head=$2 n resolved
+  local pr_url=$1 recorded_head=$2 remote=$3 n resolved
   if [ -n "$recorded_head" ] \
     && git -C "$WT" cat-file -e "$recorded_head^{commit}" 2>/dev/null; then
     printf '%s' "$recorded_head"
     return 0
   fi
   n=$(pr_number_from_target "$pr_url") || return 1
-  git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
-  git -C "$WT" fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || return 1
+  git -C "$WT" remote get-url "$remote" >/dev/null 2>&1 || return 1
+  git -C "$WT" fetch --quiet "$remote" "refs/pull/$n/head" >/dev/null 2>&1 || return 1
   resolved=$(git -C "$WT" rev-parse --verify 'FETCH_HEAD^{commit}' 2>/dev/null) || return 1
   [ -n "$resolved" ] || return 1
   printf '%s' "$resolved"
@@ -108,18 +145,18 @@ PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD_RECORDED=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
 COMPARE_REF=$BRANCH
 if [ -n "$PR_URL" ]; then
-  if PR_HEAD=$(resolve_pr_head "$PR_URL" "$PR_HEAD_RECORDED"); then
+  if PR_HEAD=$(resolve_pr_head "$PR_URL" "$PR_HEAD_RECORDED" "$BASE_REMOTE"); then
     COMPARE_REF=$PR_HEAD
   else
     echo "warning: PR head unavailable; diff may lag the open PR (using local branch $BRANCH)" >&2
   fi
 fi
 
-if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
+if git -C "$PROJ" remote get-url "$BASE_REMOTE" >/dev/null 2>&1; then
   # Update the remote-tracking ref itself; a bare single-branch fetch can leave
-  # origin/<default> stale on some Git versions and only refresh FETCH_HEAD.
-  git -C "$WT" fetch origin "+refs/heads/$DEFAULT:refs/remotes/origin/$DEFAULT" --quiet
-  BASE="origin/$DEFAULT"
+  # <remote>/<default> stale on some Git versions and only refresh FETCH_HEAD.
+  git -C "$WT" fetch "$BASE_REMOTE" "+refs/heads/$DEFAULT:refs/remotes/$BASE_REMOTE/$DEFAULT" --quiet
+  BASE="$BASE_REMOTE/$DEFAULT"
 else
   BASE="$DEFAULT"
 fi
