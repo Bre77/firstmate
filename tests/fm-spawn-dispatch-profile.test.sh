@@ -43,6 +43,16 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" treehouse
+  # This suite pins exact per-harness launch strings (model/effort threading),
+  # a concern orthogonal to the per-crew memory cap (tests/fm-crew-memory-cap.
+  # test.sh owns that). Stub systemd-run unavailable so launches stay
+  # unwrapped regardless of whether the test host has a real user systemd
+  # instance.
+  cat > "$fakebin/systemd-run" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/systemd-run"
   printf '%s\n' "$fakebin"
 }
 

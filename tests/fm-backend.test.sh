@@ -710,6 +710,17 @@ exit 0
 SH
   chmod +x "$fb/tmux"
   fm_fake_exit0 "$fb" treehouse
+  # This suite's OLD baseline predates the per-crew memory cap (fm-spawn.sh
+  # never wraps its launch), so an ambient real systemd-run on the test host
+  # would make the NEW side wrap while OLD does not - a false conformance
+  # diff unrelated to the backend-transport-layer conformance this test
+  # actually checks. Stub systemd-run unavailable so both sides launch
+  # unwrapped; tests/fm-crew-memory-cap.test.sh owns the wrap's own coverage.
+  cat > "$fb/systemd-run" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fb/systemd-run"
   printf '%s\n' "$fb"
 }
 
@@ -725,7 +736,7 @@ run_spawn_case() {  # <bin-root> <fakebin> <log> <state> <data> <config> <proj> 
 }
 
 test_spawn_conformance_old_vs_new() {
-  local old_bin fb proj wt data id log_old log_new out_old out_new
+  local old_bin fb proj wt data id log_old log_new out_old out_new out_new_filtered
   local state_old state_new config_old config_new
   old_bin=$(build_old_bin spawn-old)
   proj="$TMP_ROOT/spawn-project"; wt="$TMP_ROOT/spawn-wt"; data="$TMP_ROOT/spawn-data"
@@ -746,7 +757,14 @@ test_spawn_conformance_old_vs_new() {
 
   expect_code 0 "$rc_old" "old fm-spawn.sh should succeed"$'\n'"$out_old"
   expect_code 0 "$rc_new" "new fm-spawn.sh should succeed"$'\n'"$out_new"
-  [ "$out_old" = "$out_new" ] || fail "fm-spawn.sh stdout differs old vs new"$'\n'"--- old ---"$'\n'"$out_old"$'\n'"--- new ---"$'\n'"$out_new"
+  # The stubbed systemd-run above is unavailable (exit 1) so NEW's per-crew
+  # memory cap - absent from the OLD baseline entirely - falls back to an
+  # unwrapped launch exactly like OLD's, but that fallback path also emits a
+  # stderr warning OLD has no equivalent for. Strip that one known, expected
+  # line before the byte-identical comparison below; everything else must
+  # still match exactly.
+  out_new_filtered=$(printf '%s\n' "$out_new" | grep -v '^warning: systemd-run --user is unavailable')
+  [ "$out_old" = "$out_new_filtered" ] || fail "fm-spawn.sh stdout differs old vs new"$'\n'"--- old ---"$'\n'"$out_old"$'\n'"--- new ---"$'\n'"$out_new_filtered"
   assert_contains "$out_new" "spawned $id harness=claude kind=ship mode=no-mistakes yolo=off window=firstmate:fm-$id worktree=$wt" \
     "spawn output missing the expected summary line"
 
