@@ -26,6 +26,8 @@
 # marker) with no explicit backend setting - unlike Orca, which stays
 # never-auto-detected because it also owns the task worktree; see
 # docs/cmux-backend.md for its empirical basis.
+# Codex App is intentionally not in the known set yet.
+# docs/codex-app-backend.md owns that blocked backend contract.
 #
 # Compatibility contract: a task's meta may omit `backend=`; every reader here
 # treats that as `tmux` (fm_backend_of_meta), and fm-spawn.sh does not write
@@ -63,6 +65,7 @@ FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # spawn-capable; unlike tmux/herdr/zellij it is also the worktree provider.
 # cmux is EXPERIMENTAL and spawn-capable, session-provider-only like
 # herdr/zellij - verified against the real 0.64.17 binary (docs/cmux-backend.md).
+# codex-app remains deliberately absent; see docs/codex-app-backend.md.
 FM_BACKEND_KNOWN="tmux herdr zellij orca cmux"
 FM_BACKEND_SPAWN="tmux herdr zellij orca cmux"
 
@@ -554,8 +557,8 @@ fm_backend_busy_state() {  # <backend> <target>
 }
 
 # fm_backend_composer_state: classify the composer/input row of <target> as
-# empty|pending|unknown - the SUBMIT-side classifier each adapter already uses
-# internally to verify fm_backend_send_text_submit, exposed generically so a
+# empty|pending|unknown for callers that need a pre-submit pending-input guard
+# or an adapter's conservative submit fallback. It is exposed generically so a
 # caller other than the send path (the away-mode daemon's supervisor-pane
 # pending-input guard, bin/fm-supervise-daemon.sh) can ask the same question
 # without duplicating per-backend composer-reading logic. tmux and herdr both
@@ -626,5 +629,36 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
     *)
       return 1
       ;;
+  esac
+}
+
+# fm_backend_agent_alive: CONFIDENT liveness of a live harness-agent PROCESS
+# under <target>, distinct from fm_backend_target_exists's pane-PRESENCE-only
+# check above. A secondmate agent that has exited leaves its backend endpoint
+# alive as a bare shell; fm_backend_target_exists reports that shell as
+# "alive" because the pane itself still exists, which is exactly the gap
+# bin/fm-bootstrap.sh's session-start secondmate-liveness sweep exists to
+# close (AGENTS.md "Session start"). Prints one of:
+#   alive   - a real agent process is confirmed running.
+#   dead    - CONFIDENTLY not an agent: a bare shell (tmux) or a
+#             structurally-gone/no-agent-registered pane (herdr).
+#   unknown - anything ambiguous, unreadable, or unverified for this backend.
+# Scoped to today's --secondmate-spawn-capable backends with an empirically
+# verified classifier: tmux (docs/tmux-backend.md "Agent liveness probe") and
+# herdr (docs/herdr-backend.md "Agent liveness probe reuses the husk
+# classifier"). zellij, orca, and cmux report unknown until independently
+# verified - future work, not a functional gap for the two backends
+# --secondmate spawns actually support today plus tmux's reference path.
+# Callers must treat unknown exactly like an unreadable target: NEVER license
+# an action from it alone - the secondmate-liveness sweep gates a respawn on
+# `dead` only, precisely so a momentary read glitch can never duplicate a
+# live supervisor.
+fm_backend_agent_alive() {  # <backend> <target>
+  local backend=$1 target=$2
+  fm_backend_source "$backend" || { printf 'unknown'; return 0; }
+  case "$backend" in
+    tmux) fm_backend_tmux_agent_alive "$target" ;;
+    herdr) fm_backend_herdr_agent_alive "$target" ;;
+    *) printf 'unknown' ;;
   esac
 }
