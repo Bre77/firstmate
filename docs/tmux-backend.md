@@ -15,7 +15,7 @@ Pick tmux unless you have a specific reason to try an experimental backend (herd
 - A verified crew harness: `claude`, `codex`, `opencode`, `pi`, or `grok`.
 - `git` with GitHub auth (`gh auth login`).
 - `node`, required by firstmate's universal toolchain.
-- `treehouse` for pooling clean worktrees; `no-mistakes` for the validation pipeline; `gh-axi`, `chrome-devtools-axi`, and `lavish-axi` for GitHub, browser, and rich-review operations; `tasks-axi` 0.1.1 or newer and `quota-axi` for bootstrap-managed backlog and dispatch support.
+- `treehouse` for pooling clean worktrees; `no-mistakes` for the validation pipeline; `gh-axi`, `chrome-devtools-axi`, and `lavish-axi` for GitHub, browser, and rich-review operations; `tasks-axi` 0.1.1 or newer with `update --archive-body` and `quota-axi` for bootstrap-managed backlog and dispatch support.
 
 The first mate detects missing tools at session start and offers to install them after you approve.
 
@@ -58,7 +58,7 @@ tmux select-window -t <session-name>:fm-<id> # jump to one, or use ctrl-b <n>
 
 Use the current tmux session name when firstmate was launched inside tmux; use `firstmate` only for the detached outside-tmux path.
 Typing directly into an attached window is authoritative direct intervention - the first mate treats it the same as any other captain instruction and reconciles at the next heartbeat.
-You do not need to attach at all for routine supervision: the first mate reads crew windows itself with `bin/fm-peek.sh fm-<id>` (a bounded, read-only capture) and steers a crew with `bin/fm-send.sh fm-<id> "<text>"` when it needs to intervene.
+You do not need to attach at all for routine supervision: from an active firstmate session, the first mate reads crew windows itself with `bin/fm-peek.sh fm-<id>` (a bounded, read-only capture) and steers a crew with `FM_HOME=<this-firstmate-home> bin/fm-send.sh fm-<id> "<text>"` unless `FM_HOME` is already set to the active firstmate home.
 
 ## Verifying it works
 
