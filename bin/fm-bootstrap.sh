@@ -45,7 +45,7 @@
 #          1.31.2.
 #          tasks-axi and quota-axi are required bootstrap tools (same class as
 #          lavish-axi). tasks-axi is also version and feature gated (0.1.1+
-#          with update --archive-body); an installed but incompatible build
+#          with update --archive-body and mv [<id>...]); an installed but incompatible build
 #          reports MISSING like no-mistakes. When
 #          config/backlog-backend is not manual and tasks-axi is compatible,
 #          bootstrap prints TASKS_AXI: available. quota-axi is required because
@@ -182,10 +182,11 @@ fleet_sync() {
 }
 
 secondmate_sync() {
-  # Local-HEAD secondmate sync: fast-forward every LIVE secondmate home's worktree
+  # Local-HEAD secondmate sync: fast-forward every LIVE secondmate home
   # to the primary checkout's current default-branch commit. Purely LOCAL - no
-  # fetch, no origin dependency: a secondmate home is a worktree of this same repo
-  # and already holds the primary's commit (fm-ff-lib.sh). Emits NUDGE_SECONDMATES:
+  # fetch, no origin dependency: a linked-worktree home already holds the primary's
+  # commit (fm-ff-lib.sh), while a standalone clone without it is skipped until
+  # /updatefirstmate refreshes it from origin. Emits NUDGE_SECONDMATES:
   # only for RUNNING secondmates whose instruction surface (AGENTS.md, bin/, or
   # .agents/skills/) actually changed, so a secondmate already on the primary's
   # version is never disturbed (AGENTS.md bootstrap + supervision). Mirrors
@@ -312,7 +313,7 @@ secondmate_liveness_sweep() {
 
 install_cmd() {
   case "$1" in
-    tmux|node|gh|curl|jq|orca|python3) echo "brew install $1  # or the platform's package manager" ;;
+    tmux|node|git|gh|curl|jq|orca|python3) echo "brew install $1  # or the platform's package manager" ;;
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
     gh-axi|chrome-devtools-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
@@ -323,8 +324,8 @@ install_cmd() {
 
 BACKEND=$(fm_backend_name)
 case "$BACKEND" in
-  orca) TOOLS="orca node gh no-mistakes gh-axi chrome-devtools-axi lavish-axi tasks-axi quota-axi" ;;
-  *) TOOLS="tmux node gh treehouse no-mistakes gh-axi chrome-devtools-axi lavish-axi tasks-axi quota-axi" ;;
+  orca) TOOLS="orca node git gh no-mistakes gh-axi chrome-devtools-axi lavish-axi tasks-axi quota-axi" ;;
+  *) TOOLS="tmux node git gh treehouse no-mistakes gh-axi chrome-devtools-axi lavish-axi tasks-axi quota-axi" ;;
 esac
 NO_MISTAKES_MIN_MAJOR=1
 NO_MISTAKES_MIN_MINOR=31
