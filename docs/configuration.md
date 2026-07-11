@@ -342,6 +342,7 @@ CLICKSTACK_WEBHOOK_BIND=127.0.0.1   # fork-only ClickStack receiver bind address
 CLICKSTACK_WEBHOOK_SECRET=   # fork-only ClickStack receiver optional shared secret; empty disables the secret check
 CLICKSTACK_WEBHOOK_SECRET_HEADER=X-ClickStack-Secret   # fork-only ClickStack receiver header the shared secret is read from
 FM_CLICKSTACK_CONFIRM_TIMEOUT=10   # seconds fm-clickstack-arm waits to confirm a listening receiver before reporting FAILED
+BETTERSTACK_WEBHOOK_TOKEN=   # fork-only BetterStack /betterstack route token; generated at first arm if absent, env wins over config/betterstack-webhook.env (docs/betterstack-webhook.md)
 FM_LOCK_STALE_AFTER=2   # seconds before dead-pid lock records can be reclaimed; mid-acquire locks keep at least 2s grace
 FM_GUARD_GRACE=300      # seconds before guard warnings, arm health checks, and the primary turn-end guard treat a watcher beacon as stale
 FM_ARM_CONFIRM_TIMEOUT=10   # seconds fm-watch-arm waits to confirm a fresh watcher before reporting FAILED
