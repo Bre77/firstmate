@@ -16,4 +16,5 @@ config/backend
 config/x-mode.env
 config/cmux-socket-password
 config/clickstack-webhook.env
+config/betterstack-webhook.env
 config/wedge-alarm

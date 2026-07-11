@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Safe, home-scoped (re-)arm of the ClickStack webhook receiver, with honest
-# verification (fork-only firstmate feature). This mirrors bin/fm-watch-arm.sh:
-# firstmate runs it as the harness's own tracked background task so the daemon
-# SURVIVES the call and NOTIFIES on exit, letting firstmate re-arm it. Run it as
-# its own standalone background task, never bundled onto another command, and
-# never fire-and-forget with a shell `&` inside another call.
+# Safe, home-scoped (re-)arm of the shared ClickStack/BetterStack webhook
+# receiver, with honest verification (fork-only firstmate feature). This mirrors
+# bin/fm-watch-arm.sh: firstmate runs it as the harness's own tracked background
+# task so the daemon SURVIVES the call and NOTIFIES on exit, letting firstmate
+# re-arm it. Run it as its own standalone background task, never bundled onto
+# another command, and never fire-and-forget with a shell `&` inside another call.
 #
 # It forks the receiver (bin/fm-clickstack-recv.sh serve) as a tracked child,
 # then VERIFIES the outcome before settling in: a live singleton holder for THIS
@@ -13,11 +13,16 @@
 #   clickstack receiver: healthy pid=<N> (already listening)
 #   clickstack receiver: FAILED - could not confirm a listening receiver
 # On started/healthy it exits zero (after blocking on the child for started); on
-# FAILED it exits non-zero. Inert by default: with no gate it exits 0 silently.
+# FAILED it exits non-zero. Inert by default: with NEITHER gate (ClickStack's
+# config/clickstack-webhook.env or BetterStack's config/betterstack-webhook.env;
+# see docs/betterstack-webhook.md) it exits 0 silently. A config change to
+# either gate needs a `--restart` to take effect, since the listener reads its
+# config once at process start (bin/fm-betterstack-arm.sh does this for you).
 #
 # --stop / --restart are home-scoped: they act only on the pid recorded in THIS
 # home's state/.clickstack-recv.lock, never a broad pkill that would hit sibling
-# firstmate homes running the same daemon.
+# firstmate homes running the same daemon. They act on the WHOLE shared process,
+# so they affect both integrations together.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,6 +34,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-clickstack-lib.sh
 . "$SCRIPT_DIR/fm-clickstack-lib.sh"
+# shellcheck source=bin/fm-betterstack-lib.sh
+. "$SCRIPT_DIR/fm-betterstack-lib.sh"
 
 RECV="$SCRIPT_DIR/fm-clickstack-recv.sh"
 LOCK=$(cshook_lock_dir)
@@ -59,8 +66,8 @@ case "${1:-}" in
   *) echo "usage: $(basename "$0") [--restart|--stop]" >&2; exit 2 ;;
 esac
 
-# Inert unless opted in.
-cshook_enabled || exit 0
+# Inert unless opted in to at least one of the two integrations.
+{ cshook_enabled || bshook_enabled; } || exit 0
 
 if [ "$mode" = restart ]; then
   "$RECV" stop >/dev/null 2>&1 || true
