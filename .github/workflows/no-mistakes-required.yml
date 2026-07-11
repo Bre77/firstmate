@@ -18,6 +18,7 @@ jobs:
     name: PR must be raised via no-mistakes
     runs-on: ubuntu-latest
     if: >-
+      github.repository == 'kunchenguid/firstmate' &&
       github.event.pull_request.user.login != 'github-actions[bot]' &&
       github.event.pull_request.user.login != 'dependabot[bot]'
     steps:
