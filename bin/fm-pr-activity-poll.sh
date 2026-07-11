@@ -84,17 +84,20 @@ squash_body() {
 # gh api prints the error body to stdout (not just stderr) on a non-2xx
 # response, e.g. a 404 or a rate limit - so a failed call's captured output
 # must be discarded on a non-zero exit, never treated as TSV rows.
-comments=$(gh api "repos/$OWNER/$REPO/issues/$NUMBER/comments" --paginate \
+# --method GET is required: gh api silently switches to POST whenever -f
+# parameters are present unless the method is pinned, which would otherwise
+# turn this read-only "since" filter into an attempt to CREATE a new comment.
+comments=$(gh api "repos/$OWNER/$REPO/issues/$NUMBER/comments" --method GET --paginate \
   -f "since=$WATERMARK" \
   -q ".[] | select(.created_at > \"$WATERMARK\") | [.created_at, (.user.login // \"unknown\"), \"comment\", (.body // \"\")] | @tsv" \
   2>/dev/null) || comments=""
 
-review_comments=$(gh api "repos/$OWNER/$REPO/pulls/$NUMBER/comments" --paginate \
+review_comments=$(gh api "repos/$OWNER/$REPO/pulls/$NUMBER/comments" --method GET --paginate \
   -f "since=$WATERMARK" \
   -q ".[] | select(.created_at > \"$WATERMARK\") | [.created_at, (.user.login // \"unknown\"), \"review-comment\", (.body // \"\")] | @tsv" \
   2>/dev/null) || review_comments=""
 
-reviews=$(gh api "repos/$OWNER/$REPO/pulls/$NUMBER/reviews" --paginate \
+reviews=$(gh api "repos/$OWNER/$REPO/pulls/$NUMBER/reviews" --method GET --paginate \
   -q ".[] | select(.submitted_at != null and .submitted_at > \"$WATERMARK\") | [.submitted_at, (.user.login // \"unknown\"), \"review\", ((.body // \"\") as \$b | if (\$b | length) > 0 then \$b else (.state // \"\") end)] | @tsv" \
   2>/dev/null) || reviews=""
 
