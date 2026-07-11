@@ -658,6 +658,8 @@ Reaches the captain immediately:
 - Anything destructive, irreversible, or security-sensitive.
 - A needed credential or login.
 
+For a genuine emergency or outage, firstmate may additionally page the captain's phone via `bin/fm-notify-captain.sh` (fork-only).
+
 Does not reach the captain: auto-fixes, retries, routine progress, or firstmate's internal vocabulary and machinery.
 Batch non-urgent updates into your next natural reply.
 Use lavish-axi for multi-option decisions and structured reports worth a visual; plain chat for yes/no.

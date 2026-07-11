@@ -55,6 +55,7 @@ If you have changed away from the firstmate home in an interactive shell, invoke
 | `fm-classify-lib.sh`     | Shared captain-relevant and declared-external-wait wake classification vocabulary    |
 | `fm-send.sh`             | Send one verified literal line or supported key through the target's recorded backend |
 | `fm-tmux-lib.sh`         | Shared tmux pane primitives for busy detection, composer capture, and verified submit |
+| `fm-notify-captain.sh`   | Send an urgent/emergency Pushover push notification to the captain's phone (fork-only); tier maps to Pushover priority, secrets come from 1Password at runtime, `--dry-run` previews with secrets redacted |
 | `fm-peek.sh`             | Print a bounded tail of a crewmate endpoint                                          |
 | `fm-pr-check.sh`         | Record `pr=` and `pr_head=` for a PR-ready task, then arm the watcher's merge poll   |
 | `fm-pr-merge.sh`         | Record PR metadata, then merge a task's PR from its full GitHub URL                  |
