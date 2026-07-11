@@ -57,7 +57,8 @@ If you have changed away from the firstmate home in an interactive shell, invoke
 | `fm-tmux-lib.sh`         | Shared tmux pane primitives for busy detection, composer capture, and verified submit |
 | `fm-notify-captain.sh`   | Send an urgent/emergency Pushover push notification to the captain's phone (fork-only); tier maps to Pushover priority, secrets come from 1Password at runtime, `--dry-run` previews with secrets redacted |
 | `fm-peek.sh`             | Print a bounded tail of a crewmate endpoint                                          |
-| `fm-pr-check.sh`         | Record `pr=` and `pr_head=` for a PR-ready task, then arm the watcher's merge poll   |
+| `fm-pr-check.sh`         | Record `pr=` and `pr_head=` for a PR-ready task, then arm the watcher's merge and PR-activity poll |
+| `fm-pr-activity-poll.sh` | Surface new PR comments/reviews from anyone since a durable per-task watermark, run by the armed check.sh |
 | `fm-pr-merge.sh`         | Record PR metadata, then merge a task's PR from its full GitHub URL                  |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task                               |
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require scout reports, retire secondmate homes |
