@@ -1399,6 +1399,17 @@ fm_super_main() {
 
   local rc reason
   while true; do
+    # --- afk-clear self-exit (deterministic shutdown) ----------------------
+    # Exit must follow the flag itself, not depend on an external SIGTERM
+    # (normally bin/fm-afk-launch.sh stop) actually being delivered - a daemon
+    # whose flag is already gone must never keep polling. No flush here:
+    # escalate_flush's own presence gate would no-op it anyway, and buffered
+    # items survive for the "while you were out" catch-up.
+    if ! afk_active "$STATE"; then
+      log "afk flag cleared; daemon exiting"
+      cleanup
+    fi
+
     # --- pane-gone guard (preserved) ---------------------------------------
     # With the #29 watcher's enqueue-before-suppress, a wake is no longer
     # swallowed by running the watcher with no injection target. We still back

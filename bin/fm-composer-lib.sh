@@ -67,6 +67,11 @@ fm_composer_strip_ansi() {
 # plain, non-ghost text on stdout, dropping:
 #   - dim/faint runs (SGR 2): how claude and codex render ghost/suggestion text.
 #     A reset (SGR 0) or normal-intensity (SGR 22) ends a dim run.
+#   - a bright-black/"gray" basic foreground (SGR 90): the other conventional
+#     de-emphasis code terminal UIs use for placeholder/ghost text instead of
+#     SGR 2. A reset (SGR 0), a default-foreground (SGR 39), any base
+#     foreground colour (30-37), or any OTHER bright colour (91-97, all real
+#     hues, never muted) ends the run.
 #   - dark/muted TRUECOLOR foreground runs (SGR 38;2;r;g;b or the colon form
 #     38:2::r:g:b) whose perceived luminance (0.299R + 0.587G + 0.114B) is below
 #     FM_COMPOSER_GHOST_LUMA_MAX (default 128): how grok renders its placeholder
@@ -74,11 +79,11 @@ fm_composer_strip_ansi() {
 #     foreground colour (30-37 / 90-97), or a lighter 38;2 foreground ends the
 #     dark-foreground run. This assumes a DARK terminal theme, the firstmate
 #     fleet reality, where real typed input is bright and only de-emphasised UI
-#     is dark; the SGR-2 signal above stays theme-independent. A 256-colour
-#     foreground (38;5;n) is NOT luminance-tested - it is palette-dependent and
-#     no fleet harness uses it for ghost text, so it is kept (real text wins:
-#     under-stripping merely defers, which the max-defer alarm surfaces, while
-#     over-stripping would inject over real input).
+#     is dark; the SGR-2 and SGR-90 signals above stay theme-independent. A
+#     256-colour foreground (38;5;n) is NOT luminance-tested - it is
+#     palette-dependent and no fleet harness uses it for ghost text, so it is
+#     kept (real text wins: under-stripping merely defers, which the max-defer
+#     alarm surfaces, while over-stripping would inject over real input).
 # The dim/faint and dark-foreground states are tracked together as "de-emphasis";
 # codes are processed left to right within a sequence, so "ESC[0;2m" reads as dim.
 # LC_ALL=C makes awk walk bytes, so multibyte glyphs (e.g. ❯) and de-emphasised
@@ -140,11 +145,12 @@ fm_composer_strip_ghost() {
                 } else if (code == "48" || code == "58") {
                   p = skip_color_payload(a, p, k)
                 } else if (code == "2") dim = 1
+                else if (code == "90") darkfg = 1
                 else if (code == "0") { dim = 0; darkfg = 0 }
                 else if (code == "22") dim = 0
                 else if (code == "39") darkfg = 0
                 else if (code + 0 >= 30 && code + 0 <= 37) darkfg = 0
-                else if (code + 0 >= 90 && code + 0 <= 97) darkfg = 0
+                else if (code + 0 >= 91 && code + 0 <= 97) darkfg = 0
               }
             }
             if (j <= n) { i = j + 1; continue }

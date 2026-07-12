@@ -138,6 +138,31 @@ test_strip_ghost_drops_dark_truecolor_ghost() {
   pass "fm_tmux_strip_ghost drops a dark/muted truecolor foreground (grok placeholder)"
 }
 
+# --- SGR 90 (bright-black/"gray") foreground is ghost too --------------------
+# The 2026-07-11/12 overnight incident (docs/herdr-backend.md) reproduced the
+# same false-pending shape as the 2026-07-10 incident even though every
+# existing SGR-2/truecolor regression here still passed: SGR 90 ("bright
+# black", the other conventional basic-ANSI de-emphasis code besides SGR 2
+# dim) was the one de-emphasis rendering this owner did not strip. 91-97 are
+# real bright hues (never muted) and must stay kept, so only 90 is ghost.
+test_strip_ghost_drops_sgr90_gray_ghost() {
+  local out
+  out=$(printf '\xe2\x9d\xaf \033[90mwhat did the wheelhouse healing verification find?\033[0m\n' | fm_tmux_strip_ghost)
+  [ "$out" = "$(printf '\xe2\x9d\xaf ')" ] || fail "SGR 90 gray ghost not dropped: '$out'"
+  out=$(printf '\033[90mplaceholder hint text\033[39m\n' | fm_tmux_strip_ghost)
+  [ -z "$out" ] || fail "SGR 90 gray hint not dropped: '$out'"
+  # A reset ends the run; the tail is kept.
+  out=$(printf '\033[90mghost\033[0mREALTAIL\n' | fm_tmux_strip_ghost)
+  [ "$out" = "REALTAIL" ] || fail "reset did not end an SGR 90 run: '$out'"
+  # 91-97 are real bright colours, never muted - must stay kept, not swept in
+  # by the same bucket that used to clear 90-97 as a group.
+  out=$(printf '\033[91mbright red typed\033[0m\n' | fm_tmux_strip_ghost)
+  [ "$out" = "bright red typed" ] || fail "SGR 91 bright red wrongly dropped as ghost: '$out'"
+  out=$(printf '\033[97mbright white typed\033[0m\n' | fm_tmux_strip_ghost)
+  [ "$out" = "bright white typed" ] || fail "SGR 97 bright white wrongly dropped as ghost: '$out'"
+  pass "fm_tmux_strip_ghost drops an SGR 90 gray foreground (the other basic-ANSI ghost code), keeps 91-97"
+}
+
 # --- fm_pane_input_pending: dim ghost is not pending ------------------------
 
 test_dim_ghost_only_composer_is_not_pending() {
@@ -203,6 +228,22 @@ test_colored_text_with_2_payload_still_pending() {
     fm_pane_input_pending "fakepane" \
     || fail "colon underline typed text was not detected as pending"
   pass "fm_pane_input_pending: bright colored text with 2 payloads is still pending"
+}
+
+test_sgr90_gray_ghost_only_composer_is_not_pending() {
+  local dir fb capture
+  dir="$TMP_ROOT/sgr90-ghost"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  # The overnight wedge shape: a bare prompt glyph + an SGR 90 gray rotating
+  # suggestion, reproduced here exactly as the daemon log's target composer
+  # would have looked (backend herdr, but the shared owner is backend-agnostic).
+  printf '\xe2\x9d\xaf \033[90mwhat did the wheelhouse healing verification find?\033[0m\n' > "$capture"
+  if PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
+     fm_pane_input_pending "fakepane"; then
+    fail "SGR 90 gray ghost-only composer falsely read as pending (the overnight wedge shape)"
+  fi
+  pass "fm_pane_input_pending: an SGR 90 gray ghost-only composer is NOT pending"
 }
 
 test_dark_truecolor_ghost_only_composer_is_not_pending() {
@@ -280,7 +321,9 @@ test_strip_ghost_drops_dim_keeps_normal
 test_strip_ghost_handles_combined_and_boundary_codes
 test_strip_ghost_keeps_colored_text_with_2_payloads
 test_strip_ghost_drops_dark_truecolor_ghost
+test_strip_ghost_drops_sgr90_gray_ghost
 test_dim_ghost_only_composer_is_not_pending
+test_sgr90_gray_ghost_only_composer_is_not_pending
 test_dim_ghost_inside_bordered_composer_is_not_pending
 test_normal_text_still_pending
 test_colored_text_with_2_payload_still_pending

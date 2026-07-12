@@ -986,6 +986,24 @@ test_composer_state_claude_dim_ghost_row_with_real_text_is_pending() {
   pass "fm_backend_herdr_composer_state: real typed text on the same claude prompt row still reads pending"
 }
 
+# The 2026-07-11/12 overnight incident (docs/herdr-backend.md) reproduced the
+# same false-pending shape on this exact target (backend herdr, claude
+# primary, composer state=pending for ~9.4h per the daemon log) even though
+# the SGR-2 dim fix above already landed. No raw composer bytes were captured
+# for that run - only the daemon's textual log - so this fixture uses SGR 90
+# ("bright black"/gray), the other conventional basic-ANSI de-emphasis code,
+# as the strongest supported hypothesis for what the SGR-2-only fix missed.
+test_composer_state_claude_sgr90_gray_prompt_suggestion_ghost_is_empty() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-claude-sgr90-ghost"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '\xe2\x9c\xbb Brewed for 2m 40s\n\n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n\xe2\x9d\xaf \x1b[0m\x1b[90mwhat did the wheelhouse healing verification find?\x1b[0m\n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n  Fable 5                 80%%\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p3' "$ROOT" )
+  [ "$out" = empty ] || fail "claude's SGR-90 gray prompt-suggestion ghost after a bare '❯' must read empty, got '$out' (regression: the 2026-07-11/12 overnight wedge)"
+  pass "fm_backend_herdr_composer_state: claude's SGR-90 gray prompt-suggestion ghost (the 2026-07-11/12 wedge shape) reads empty"
+}
+
 # grok's TRUECOLOR placeholder gap (harness-adapters "Known gap"), now covered by
 # the same owner. grok renders its composer inside a bordered box whose border
 # and placeholder/hint text use a dark, muted truecolor foreground (verified live
@@ -2025,6 +2043,7 @@ test_composer_state_claude_unbordered_prompt_is_pending
 test_composer_state_bare_prompt_below_stale_bordered_banner_wins
 test_composer_state_claude_dim_prompt_suggestion_ghost_is_empty
 test_composer_state_claude_dim_ghost_row_with_real_text_is_pending
+test_composer_state_claude_sgr90_gray_prompt_suggestion_ghost_is_empty
 test_composer_state_grok_dark_truecolor_placeholder_is_empty
 test_composer_state_grok_bright_truecolor_real_text_is_pending
 test_composer_state_codex_bare_prompt_glyph_is_empty

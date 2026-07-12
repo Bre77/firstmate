@@ -229,6 +229,10 @@ These properties must hold:
 - The daemon preserves a single-instance portable lock, crash-loop backoff,
   a pane-gone guard, and a signal-trapped shutdown that flushes buffered
   escalations before exit.
+- Exit does not depend solely on receiving a signal: the daemon's own main
+  loop watches `state/.afk` and self-exits the moment it is gone, so a
+  daemon whose flag was cleared without a `bin/fm-afk-launch.sh stop` (or a
+  missed/failed signal delivery) never outlives its own away-mode window.
 
 `FM_INJECT_SKIP` (default `heartbeat`) force-self-handles matching kinds,
 overriding classification.
