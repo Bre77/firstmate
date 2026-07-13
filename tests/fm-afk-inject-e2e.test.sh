@@ -423,8 +423,48 @@ test_scenario_c() {
   pass "Scenario C: a normal captain status injects exactly one clean single-line sentinel digest"
 }
 
+# --- Scenario D: afk cleared out of band -> deterministic self-exit ---------
+# The 2026-07-12 incident (docs/herdr-backend.md) left a daemon running for
+# hours after its own flag cleared because exit depended entirely on an
+# external SIGTERM (normally bin/fm-afk-launch.sh stop) being delivered. This
+# clears .afk directly - bypassing afk_exit/fm-afk-launch.sh entirely, exactly
+# the "flag gone, nobody signaled the daemon" shape - and asserts the running
+# daemon PROCESS notices on its own and exits, with no signal ever sent to it.
+
+test_scenario_d() {
+  reset_state
+  afk_enter "$STATE_DIR"
+  start_daemon
+
+  # Clear .afk directly. No kill, no afk_exit call: only the flag disappears.
+  rm -f "$STATE_DIR/.afk"
+
+  # The daemon must notice and exit itself within a few housekeeping ticks.
+  local i=0
+  while [ "$i" -lt 50 ]; do
+    kill -0 "$DAEMON_PID" 2>/dev/null || break
+    sleep 0.2
+    i=$((i + 1))
+  done
+  if kill -0 "$DAEMON_PID" 2>/dev/null; then
+    kill "$DAEMON_PID" 2>/dev/null || true
+    wait "$DAEMON_PID" 2>/dev/null || true
+    fail "Scenario D: daemon kept running after state/.afk was cleared out of band"
+  fi
+  wait "$DAEMON_PID" 2>/dev/null || true
+  DAEMON_PID=""
+
+  grep -q "afk flag cleared; daemon exiting" "$STATE_DIR/.supervise-daemon.log" \
+    || fail "Scenario D: daemon log missing the self-exit reason"
+  grep -q "daemon shutting down" "$STATE_DIR/.supervise-daemon.log" \
+    || fail "Scenario D: daemon log missing the shutdown line"
+
+  pass "Scenario D: a daemon whose afk flag is cleared out of band exits itself, with no external kill"
+}
+
 test_scenario_a
 test_scenario_b
 test_scenario_c
+test_scenario_d
 
 echo "all e2e injection tests passed"
