@@ -294,6 +294,44 @@ fm_backend_validate_spawn() {  # <name>
   return 1
 }
 
+# fm_backend_required_tools: the backend-SPECIFIC CLI tools a firstmate home on
+# <backend> genuinely requires, beyond firstmate's universal toolchain (owned by
+# docs/configuration.md "Toolchain" and bootstrap's COMMON list). This is the
+# single owner of the per-backend dependency delta, so bootstrap follows the
+# RESOLVED backend instead of demanding an inactive backend's tools. Each set is:
+#   - the session-provider CLI itself (tmux/herdr/zellij/orca/cmux);
+#   - jq, for the JSON-emitting experimental adapters (herdr, zellij, cmux) whose
+#     spawn/liveness paths parse the backend's JSON output (see each adapter's
+#     tool check, e.g. fm_backend_herdr_tool_check);
+#   - the treehouse worktree provider for every session-provider-only backend
+#     (tmux, herdr, zellij, cmux); orca owns its own task worktree and terminal,
+#     so it drops both treehouse and any other backend's session CLI.
+# Prints a single space-separated line and returns 0 for a known backend; returns
+# 1 and prints nothing for an unknown backend.
+fm_backend_required_tools() {  # <backend>
+  case "$1" in
+    tmux)   printf '%s' 'tmux treehouse' ;;
+    herdr)  printf '%s' 'herdr jq treehouse' ;;
+    zellij) printf '%s' 'zellij jq treehouse' ;;
+    cmux)   printf '%s' 'cmux jq treehouse' ;;
+    orca)   printf '%s' 'orca' ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_backend_required_tool_available() {  # <backend> <tool>
+  local backend=$1 tool=$2 required
+  required=$(fm_backend_required_tools "$backend") || return 1
+  fm_backend_list_contains "$required" "$tool" || return 1
+  case "$backend:$tool" in
+    cmux:cmux)
+      fm_backend_source cmux >/dev/null 2>&1 || return 1
+      fm_backend_cmux_bin >/dev/null 2>&1
+      ;;
+    *) command -v "$tool" >/dev/null 2>&1 ;;
+  esac
+}
+
 # fm_meta_get: the LAST value of `key=` in <meta-file>, or empty (never
 # errors) if the file or key is absent. Mirrors the ad hoc `grep '^key=' |
 # tail -1 | cut -d= -f2-` snippet every fm-*.sh script used to repeat inline.
