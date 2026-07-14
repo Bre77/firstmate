@@ -187,6 +187,50 @@ status_open_decisions() {  # <status-file>
   printf '%s' "$open"
 }
 
+# Fold material routed-work phases in the same keyed event stream.
+# A working or declared-pause event opens or replaces one phase for its key.
+# A later done, failed, needs-decision, blocked, or resolved event carrying that
+# key closes the phase, because it has moved to a terminal or separately tracked
+# state.
+# A bare legacy event uses the default key, preserving one-phase behavior.
+# This fold is evidence about whether a parent event was explicitly superseded.
+# It is never authoritative current crew state, and consumers must not let an open
+# phase outrank a structured home snapshot or fm-crew-state result.
+_fm_status_open_activities_stream() {
+  local line verb key note resolve open='' stripped pause
+  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  pause=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
+  while IFS= read -r line || [ -n "$line" ]; do
+    stripped=${line//[[:space:]]/}
+    [ -n "$stripped" ] || continue
+    verb=$(status_line_verb "$line")
+    key=$(_fm_decision_key "$line") || continue
+    case "$verb" in
+      working|"$pause")
+        note=$(status_line_note "$line")
+        open=$(_fm_decision_drop "$open" "$key")
+        [ -n "$open" ] && open="${open}"$'\n'
+        open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
+        ;;
+      done|failed|needs-decision|blocked|"$resolve")
+        open=$(_fm_decision_drop "$open" "$key")
+        [ -n "$open" ] && open="${open}"$'\n'
+        ;;
+    esac
+  done
+  printf '%s' "$open"
+}
+
+status_open_activities() {  # <status-file-or-dash>
+  local f=$1
+  if [ "$f" = - ]; then
+    _fm_status_open_activities_stream
+    return 0
+  fi
+  [ -f "$f" ] || return 0
+  _fm_status_open_activities_stream < "$f"
+}
+
 # task id from a recorded window target, falling back to the tmux-shaped
 # "<session>:fm-<id>" form when no metadata state is available.
 window_to_task() {

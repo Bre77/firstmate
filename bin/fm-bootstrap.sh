@@ -634,7 +634,8 @@ crew_dispatch_validate() {
       if $e == null then true
       elif ($e | type) != "string" then false
       elif $h == "claude" then (["low","medium","high","xhigh","max"] | index($e))
-      elif ($h == "codex" or $h == "grok" or $h == "pi") then (["low","medium","high","xhigh"] | index($e))
+      elif ($h == "codex" or $h == "pi") then (["low","medium","high","xhigh"] | index($e))
+      elif $h == "grok" then (["low","medium","high"] | index($e))
       elif $h == "opencode" then false
       else true
       end;
