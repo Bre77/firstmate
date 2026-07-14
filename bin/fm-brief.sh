@@ -65,8 +65,12 @@
 # over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
 # self-governance section when a touched project AGENTS.md lacks it.
 # PR-producing ship briefs (no-mistakes, direct-PR, fork-only) also carry the
-# PR-body Intent contract: the opening Intent/What section must be a scannable
-# tree, with long narrative collapsed at the bottom; this scaffold owns that contract.
+# PR-body contract: match the target repo's own merged-PR norm first (its own
+# PR template, when it has one, IS the whole contract), write the why and
+# goal rather than a diff tour, and self-calibrate size to that norm; the
+# structured Intent/What tree survives only as a last-resort fallback for a
+# repo with neither a template nor a discoverable norm. This scaffold owns
+# that contract in full.
 # Every ship brief also carries a Code comments contract: a banned-pattern list
 # (no docs/plans, design-doc, PR-number, or report pointers in shipped code),
 # a terseness bar, and, on PR-producing briefs, a rule against internal
@@ -465,19 +469,22 @@ EOF
 esac
 
 # PR-producing modes (no-mistakes, direct-PR, fork-only) carry the PR-body
-# Intent contract; local-only has no PR. Same $(cat <<EOF) apostrophe hazard as
+# contract; local-only has no PR. Same $(cat <<EOF) apostrophe hazard as
 # the DOD blocks above.
 if [ "$MODE" != local-only ]; then
 PRBODY=$(cat <<EOF
 # PR body
-When you write or edit the PR body - the \`--body-file\` content for fork-only, or via \`gh-axi pr edit\` once a no-mistakes/direct-PR PR exists - keep its opening \`## Intent\` (or \`## What\`) section a scannable tree, not a prose wall.
-- Top-level bullets: the issue or issues addressed, with evidence numbers only where they genuinely matter to a reviewer.
-- Sub-bullets: the fix approach, implications (behavior changes, operational notes, deploy requirements), and explicit scope boundaries (what was deliberately NOT done).
-- Typically 3-8 top-level bullets, nested 2-3 levels max; let the shape flex with the change type (bug fix: issue -> root cause -> fix -> implication; feature: goal -> approach -> limits; ops: what -> why -> blast radius), never a rigid template.
-Long-form narrative or the original task prompt may appear only at the BOTTOM of the body, collapsed inside \`<details><summary>Full narrative / original brief</summary>...</details>\`, never at the top.
-Keep the other body sections (What Changed, Risk Assessment, Testing, evidence details) intact.
-These rules apply where we own the PR template; a repo with its own strict upstream PR template wins - follow that template, and keep the description concise and human: explain why and toward what goal, not a line-by-line tour of the diff (the reviewer reads the code).
+When you write or edit the PR body - the \`--body-file\` content for fork-only, or via \`gh-axi pr edit\` once a no-mistakes/direct-PR PR exists - calibrate to the TARGET repo you are shipping into, never to firstmate's own past PRs: the target repo's own merged-PR history is the norm to match, and our prior PRs are never the gold standard.
+1. Skim a handful of the target repo's actual merged PRs before writing, and match their length, structure, and tone.
+2. If the target repo has its own PR template, that template IS the whole contract: fill it in and add nothing outside it.
+3. Write the WHY and the goal the change serves, not a line-by-line tour of the diff - the reviewer reads the code.
+4. Size follows the same calibration: match the length band the repo's own merged PRs actually use, and if you must exceed it, say why in the body itself rather than padding it further.
+
+Drop by default: a diff tour, an evidence dump, a decision-history narrative, a test-by-test account, an explicit scope-boundary section, a defense of the PR's own size, or meta-narration about how the work was done.
+Always keep, even under the strictest conciseness: whatever content the target repo's own template mandates; a single sentence disclosing any unverified work; a dependency bump's compare link, never dropped; and the no-planning-docs rule below.
 Internal planning or brainstorm docs, such as a \`docs/plans/*\` WIP file, never ride your PR: leave them out of the diff entirely.
+
+Last-resort default: only when the target repo has no PR template AND no discoverable merged-PR norm to match, fall back to a scannable tree for the opening \`## Intent\` (or \`## What\`) section instead of a prose wall - top-level bullets for the issue(s) addressed, sub-bullets for the fix approach and implications (behavior changes, operational notes, deploy requirements), typically 3-8 top-level bullets nested 2-3 levels max, shape flexing with the change type (bug fix: issue -> root cause -> fix -> implication; feature: goal -> approach -> limits; ops: what -> why -> blast radius); collapse any long-form narrative or the original task prompt only at the BOTTOM of the body inside \`<details><summary>Full narrative / original brief</summary>...</details>\`, never at the top.
 EOF
 )
 DOD="$PRBODY

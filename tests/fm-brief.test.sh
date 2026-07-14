@@ -113,11 +113,14 @@ test_fork_only_brief_contract() {
   pass "fm-brief.sh: --fork-only overrides the registered mode with a clean fork-only contract"
 }
 
-# The PR-body Intent contract rides only on PR-producing modes: no-mistakes,
-# direct-PR, and fork-only briefs get the "# PR body" section (tree-shaped
-# opening section, narrative collapsed at the bottom, gh-axi pr edit as the
-# restructure tool for modes where the PR already exists); local-only has no
-# PR, so its brief must not carry the section.
+# The PR-body contract rides only on PR-producing modes: no-mistakes,
+# direct-PR, and fork-only briefs get the "# PR body" section. Its priority
+# order is: match the target repo's own merged-PR norm first, treat a
+# discovered PR template as the whole contract, write why/goal over a diff
+# tour, and self-calibrate size to that norm; the old structured Intent/What
+# tree survives only as an explicitly-labeled last-resort fallback for a repo
+# with neither a template nor a discoverable norm. local-only has no PR, so
+# its brief must not carry the section.
 test_pr_body_contract_by_mode() {
   local home brief
   home="$TMP_ROOT/prbody-home"
@@ -130,10 +133,27 @@ test_pr_body_contract_by_mode() {
     brief="$home/data/$id/brief.md"
     assert_present "$brief" "$id: brief was not scaffolded"
     assert_grep "# PR body" "$brief" "$id: brief missing the PR body section"
-    assert_grep "scannable tree" "$brief" "$id: PR body section lost the tree requirement"
+    assert_grep "target repo's own merged-PR history is the norm to match" "$brief" \
+      "$id: PR body section lost the match-the-target-repo-norm primary rule"
+    assert_grep "our prior PRs are never the gold standard" "$brief" \
+      "$id: PR body section lost the never-hold-up-our-own-PRs steer"
+    assert_grep "that template IS the whole contract" "$brief" \
+      "$id: PR body section lost the template-is-the-whole-contract rule"
+    assert_grep "Write the WHY and the goal the change serves, not a line-by-line tour of the diff" "$brief" \
+      "$id: PR body section lost the why-not-diff-tour rule"
+    assert_grep "Size follows the same calibration" "$brief" \
+      "$id: PR body section lost the self-calibrating size rule"
+    assert_grep "a single sentence disclosing any unverified work" "$brief" \
+      "$id: PR body section lost the one-sentence unverified-work disclosure keep"
+    assert_grep "a dependency bump's compare link, never dropped" "$brief" \
+      "$id: PR body section lost the hard-keep compare-link rule"
     assert_grep "gh-axi pr edit" "$brief" "$id: PR body section lost the restructure tool"
     assert_grep "BOTTOM of the body" "$brief" "$id: PR body section lost the bottom-narrative rule"
-    assert_grep "strict upstream PR template" "$brief" "$id: PR body section lost the upstream-template exception"
+    assert_grep "Last-resort default: only when the target repo has no PR template AND no discoverable merged-PR norm" "$brief" \
+      "$id: PR body section did not demote the structured tree to an explicit last-resort fallback"
+    assert_grep "scannable tree" "$brief" "$id: PR body section lost the fallback tree shape"
+    assert_no_grep "Typically 3-8 top-level bullets, nested 2-3 levels max; let the shape flex" "$brief" \
+      "$id: PR body section regressed the fallback tree to the old primary-rule wording"
   done
 
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-prbody-fo-c3 direct-proj --fork-only >/dev/null 2>&1

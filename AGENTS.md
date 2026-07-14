@@ -732,7 +732,7 @@ For a ship task the definition of done is shaped by the project's delivery mode 
 The no-mistakes brief points to no-mistakes' version-matched guidance and keeps only firstmate-specific wrapper rules for `ask-user` escalation, `--yes` avoidance, and the CI-green done line.
 The scaffold reads the mode via `fm-project-mode.sh`, so you do not pass it.
 Ship briefs also include the project-memory contract: run `bin/fm-ensure-agents-md.sh` when the project already has agent-memory files or when the task produced durable project-intrinsic knowledge, then record proportionate learnings in `AGENTS.md`.
-PR-producing ship briefs (no-mistakes, direct-PR, fork-only) also carry the PR-body contract, stated in full only in the `bin/fm-brief.sh` scaffold: the crewmate keeps the PR body's opening Intent/What section a scannable tree and relocates long narrative to a bottom collapsed block.
+PR-producing ship briefs (no-mistakes, direct-PR, fork-only) also carry the PR-body contract, stated in full only in the `bin/fm-brief.sh` scaffold.
 Every ship brief also carries a Code comments contract, stated in full only in the `bin/fm-brief.sh` scaffold: a shipped code comment states one WHY constraint in isolation, an explicit banned-pattern list keeps history and cross-references out (the one exception is a pointer to the project's own `AGENTS.md`/`ARCHITECTURE.md`), and internal planning docs never ride a PR.
 For scout tasks add `--scout`: the scaffold swaps the definition of done for the report contract (findings to `data/<id>/report.md`, no branch, no push, no PR) and declares the worktree scratch; scout is mode-agnostic.
 Scout briefs do not include the project-memory step, because their deliverable is a report rather than a committed project change.
