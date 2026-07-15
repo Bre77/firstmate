@@ -384,6 +384,66 @@ test_lock_paused_mid_acquire_claim_fails_during_steal() {
   pass "paused mid-acquire claimant backs off to active stealer"
 }
 
+test_lock_prep_fn_publishes_atomically_before_ln() {
+  # Regression for the fm-turnend-guard.sh false positive: fm-watch.sh writes
+  # its identity (fm-home, watcher-path, pid-identity) through a prep_fn hook
+  # that fm_lock_try_create runs BEFORE ln -s publishes the lock, so pid and
+  # identity content become visible to any reader in one atomic step. Before the
+  # fix, pid was published first and identity written afterward by the caller,
+  # so a reader landing in that gap saw a live pid with no matching identity and
+  # misreported "no live watcher holds this home lock". A deliberately slow
+  # prep_fn makes that window wide and deterministic instead of a timing guess.
+  local dir state lockdir marker started_pid i rc identity
+  dir=$(make_case lock-atomic-prep)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  marker="$dir/prep-started"
+
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    marker="$3"
+    slow_prep() {
+      : > "$marker"
+      sleep 1.5
+      printf "identity-written\n" > "$1/pid-identity"
+    }
+    fm_lock_try_acquire "$2" slow_prep
+  ' _ "$LIB" "$lockdir" "$marker" &
+  started_pid=$!
+
+  i=0
+  while [ "$i" -lt 50 ] && [ ! -e "$marker" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if [ ! -e "$marker" ]; then
+    kill "$started_pid" 2>/dev/null || true
+    wait "$started_pid" 2>/dev/null || true
+    fail "slow prep_fn never started"
+  fi
+
+  # Sample repeatedly through the slow write: the lock must stay entirely
+  # undiscoverable the whole time, never a half-formed pid-without-identity
+  # state a guard read could misinterpret as a mismatched watcher.
+  i=0
+  while [ "$i" -lt 10 ]; do
+    if [ -e "$lockdir" ]; then
+      kill "$started_pid" 2>/dev/null || true
+      wait "$started_pid" 2>/dev/null || true
+      fail "lock became visible before prep_fn finished writing identity content"
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+
+  wait "$started_pid"; rc=$?
+  [ "$rc" -eq 0 ] || fail "acquirer with slow prep_fn failed (rc=$rc)"
+  [ -e "$lockdir/pid" ] || fail "published lock is missing pid"
+  identity=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
+  [ "$identity" = "identity-written" ] || fail "published lock is missing prep_fn's identity content (got '$identity')"
+  pass "lock prep_fn content publishes atomically with pid, never observable half-written"
+}
+
 test_watch_restart_rejects_reused_pid() {
   local dir state fakebin out live pid i lock_pid
   dir=$(make_case restart-reused-pid)
@@ -716,6 +776,7 @@ test_lock_does_not_steal_live_lock
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
+test_lock_prep_fn_publishes_atomically_before_ln
 test_watch_restart_rejects_reused_pid
 test_watch_restart_reports_healthy_peer_without_attaching
 test_watcher_self_evicts_on_lock_takeover

@@ -144,6 +144,16 @@ So the model was re-invoked solely by the background task's completion while idl
 This matches the harness tool contract that a `run_in_background` task "keeps running across turns and re-invokes you when it exits", and reproduces the 11s latency the task audit measured independently on the same harness version.
 No Herdr command was issued and no fleet state was touched; the experiment wrote only to the session scratchpad, which was discarded.
 
+### 2026-07-15: watcher startup identity race closed
+
+Reproduced repeatedly on 2026-07-14 and 2026-07-15: the guard blocked a turn end immediately after `bin/fm-watch-arm.sh`, reporting "no live watcher holds this home lock", while the watcher it had just armed was genuinely alive, with a live pid in `state/.watch.lock/pid` and a beacon that showed as freshly touched moments later.
+Root cause: `bin/fm-watch.sh` published the watch lock's `pid` file, which is enough for `fm_pid_alive` to succeed, before it wrote the `fm-home`, `watcher-path`, and `pid-identity` files that `fm_watcher_lock_matches_pid` requires to match.
+A guard read landing in that gap saw a live pid with no matching identity yet and reported an unhealthy watcher, even though the watcher was mid-startup and about to finish within milliseconds.
+The gap widened under fleet load because `fm_pid_identity` shells out to `ps`, and the `pid` file was already visible to readers well before that subprocess returned.
+The fix threads an optional `prep_fn` hook through `fm_lock_try_create`/`fm_lock_try_acquire` (`bin/fm-wake-lib.sh`) that writes into the not-yet-published lock owner directory before the `ln -s` that makes the lock discoverable.
+`bin/fm-watch.sh` now writes `fm-home`, `watcher-path`, and `pid-identity` through that hook, so `pid` and identity become visible to any reader in one atomic step; there is no longer a window where the lock looks claimed but unmatched.
+`tests/fm-watcher-lock.test.sh` (`test_lock_prep_fn_publishes_atomically_before_ln`) reproduces the window deterministically with a slow `prep_fn` and asserts the lock stays entirely undiscoverable until the write completes.
+
 ## Tests
 
 `tests/fm-turnend-guard.test.sh` covers the shared predicate, primary scoping (including a secondmate's own home being guarded like the main primary while its child worktrees stay exempt), `FM_HOME` and `FM_STATE_OVERRIDE` precedence, Pi logical-run latch behavior for no-tool and multi-tool runs, fail-open behavior without `jq`, tracked hook registration for all five harnesses, and the Grok adapter's forced-resume loop guard and permission-mode regression.
