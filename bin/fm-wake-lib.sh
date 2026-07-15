@@ -99,13 +99,13 @@ fm_watcher_healthy() {
   FM_WATCHER_HEALTHY_PID=
   lockdir="$state/.watch.lock"
   beat="$state/.last-watcher-beat"
+  age=$(fm_path_age "$beat")
+  [ "$age" -lt "$grace" ] || return 1
   while :; do
     ownerdir=$(fm_lock_read_dir "$lockdir" 2>/dev/null) || ownerdir=
     if [ -n "$ownerdir" ]; then
       pid=$(cat "$ownerdir/pid" 2>/dev/null || true)
       if fm_pid_alive "$pid" && fm_watcher_lock_owner_matches "$ownerdir" "$watch_path" "$pid" "$home"; then
-        age=$(fm_path_age "$beat")
-        [ "$age" -lt "$grace" ] || return 1
         # shellcheck disable=SC2034 # Read by callers after fm_watcher_healthy returns.
         FM_WATCHER_HEALTHY_PID=$pid
         return 0
