@@ -179,7 +179,7 @@ fm_lock_claim() {
 }
 
 fm_lock_try_create() {
-  local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
+  local lockdir=$1 allowed_steal_owner=${2:-} prep_fn=${3:-} ownerdir
   FM_LOCK_OWNER_DIR=
   ownerdir=$(fm_lock_owner_dir "$lockdir") || return 1
   if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
@@ -187,6 +187,15 @@ fm_lock_try_create() {
     return 1
   fi
   if ! fm_lock_prepare_owner "$ownerdir"; then
+    fm_lock_discard_owner "$ownerdir"
+    return 1
+  fi
+  # A caller-supplied prep_fn writes extra content (e.g. the watcher's identity
+  # files) into ownerdir here, BEFORE the ln -s below makes it discoverable at
+  # lockdir. That ordering is what makes pid and any prep_fn content appear to
+  # every reader atomically: nobody can observe a lockdir whose pid is alive but
+  # whose prep_fn content is still being written.
+  if [ -n "$prep_fn" ] && ! "$prep_fn" "$ownerdir"; then
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
@@ -249,11 +258,11 @@ fm_lock_recheck_stale_owner() {
 }
 
 fm_lock_try_acquire() {
-  local lockdir=$1 pid steal cur rc steal_owner primary_owner
+  local lockdir=$1 prep_fn=${2:-} pid steal cur rc steal_owner primary_owner
   FM_LOCK_HELD_PID=
   FM_LOCK_OWNER_DIR=
 
-  if fm_lock_try_create "$lockdir"; then
+  if fm_lock_try_create "$lockdir" "" "$prep_fn"; then
     return 0
   fi
 
@@ -309,7 +318,7 @@ fm_lock_try_acquire() {
 
   fm_lock_remove_path "$lockdir" || true
   rc=1
-  if fm_lock_try_create "$lockdir" "$steal_owner"; then
+  if fm_lock_try_create "$lockdir" "$steal_owner" "$prep_fn"; then
     rc=0
   fi
   if [ "$rc" -ne 0 ]; then

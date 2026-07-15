@@ -610,7 +610,23 @@ if [ "${BASH_SOURCE[0]}" != "$0" ]; then
   return 0
 fi
 
-if ! fm_lock_try_acquire "$WATCH_LOCK"; then
+# Writes this watcher's identity (fm-home, watcher-path, pid-identity) into the
+# not-yet-published lock owner dir, via fm_lock_try_create's prep_fn hook, so it
+# lands atomically with pid: any reader (e.g. fm-turnend-guard.sh) that can see
+# the lock at all sees a pid and a matching identity together, never a live pid
+# with identity fields still being written. fm_pid_identity shells out to ps, so
+# writing these AFTER publish (as this used to do) left a real, load-widened gap
+# where the lock looked claimed but unmatched. Tolerates write failure exactly
+# like the previous unconditional writes did: a failure here must never block
+# the watcher from starting.
+fm_watch_write_identity() {
+  local ownerdir=$1
+  printf '%s\n' "$FM_HOME" > "$ownerdir/fm-home" || true
+  printf '%s\n' "$WATCH_PATH" > "$ownerdir/watcher-path" || true
+  fm_pid_identity "${BASHPID:-$$}" > "$ownerdir/pid-identity" 2>/dev/null || true
+}
+
+if ! fm_lock_try_acquire "$WATCH_LOCK" fm_watch_write_identity; then
   BEAT="$STATE/.last-watcher-beat"
   if [ -n "${FM_LOCK_HELD_PID:-}" ]; then
     if [ -e "$BEAT" ]; then
@@ -634,9 +650,6 @@ trap 'fm_lock_release "$WATCH_LOCK"' EXIT
 # ${BASHPID:-$$} from this same main shell). Read directly, never via a command
 # substitution, so it matches the stored holder pid for the self-eviction check.
 WATCHER_PID=${BASHPID:-$$}
-printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" || true
-printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
-fm_pid_identity "$WATCHER_PID" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
 
