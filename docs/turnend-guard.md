@@ -154,6 +154,16 @@ The fix threads an optional `prep_fn` hook through `fm_lock_try_create`/`fm_lock
 `bin/fm-watch.sh` now writes `fm-home`, `watcher-path`, and `pid-identity` through that hook, so `pid` and identity become visible to any reader in one atomic step; there is no longer a window where the lock looks claimed but unmatched.
 `tests/fm-watcher-lock.test.sh` (`test_lock_prep_fn_publishes_atomically_before_ln`) reproduces the window deterministically with a slow `prep_fn` and asserts the lock stays entirely undiscoverable until the write completes.
 
+### 2026-07-15: watcher READ-side race closed
+
+A second, distinct false-positive fired a dozen-plus times in the same sessions after the write-side fix above landed: the guard still reported "no live watcher holds this home lock" moments after a re-arm, with a live pid and a beacon that was demonstrably fresh (1-40s old) by the time it was inspected.
+Root cause: `fm_watcher_healthy` and `fm_watcher_lock_matches_pid` read a watcher's `pid`, `fm-home`, `watcher-path`, and `pid-identity` via four separate `$state/.watch.lock/<file>` accesses, each independently re-following the `.watch.lock` symlink.
+That symlink is swapped to a fresh owner directory whenever a re-arm steals a dead watcher's lock (`fm_lock_try_create`'s remove-then-recreate sequence in `bin/fm-wake-lib.sh`).
+A reader landing between two of those four accesses while a swap was in flight could read fields from two different owners - a live pid from the new owner crossed with a stale or empty identity from the old one, or vice versa - and misreport a live, fresh-beacon watcher as mismatched, even though each owner's own published files were individually consistent.
+The fix resolves the lock's owner directory exactly once per call (`fm_lock_read_dir`, `bin/fm-wake-lib.sh`) and reads every field from that fixed path, so a concurrent swap can no longer tear a read across two owners; a straggling reader either sees one owner's fully-consistent data or a clean absent read, never a chimera.
+`fm_watcher_healthy` additionally retries a few times with a short sleep when that resolution fails while the beacon is still within grace, to ride out the residual sub-millisecond window where an owner directory is being torn down by its own process's exit trap; a stale beacon still short-circuits without retrying, since a real "no live watcher" report only gets slower, never wrong, from retrying it.
+`tests/fm-watcher-lock.test.sh` (`test_watcher_healthy_survives_read_side_lock_swap`) reproduces the race deterministically: it arms a real watcher, resolves its owner directory once the way `fm_watcher_healthy` now does, swaps the published lock to a second dead owner, and asserts the already-resolved snapshot still describes the original owner consistently while a fresh call correctly reports the swapped-to dead owner as unhealthy.
+
 ## Tests
 
 `tests/fm-turnend-guard.test.sh` covers the shared predicate, primary scoping (including a secondmate's own home being guarded like the main primary while its child worktrees stay exempt), `FM_HOME` and `FM_STATE_OVERRIDE` precedence, Pi logical-run latch behavior for no-tool and multi-tool runs, fail-open behavior without `jq`, tracked hook registration for all five harnesses, and the Grok adapter's forced-resume loop guard and permission-mode regression.

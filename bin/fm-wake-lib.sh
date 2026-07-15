@@ -50,12 +50,22 @@ fm_path_age() {
   echo $(( $(date +%s) - m ))
 }
 
-fm_watcher_lock_matches_pid() {
-  local state=$1 watch_path=$2 pid=$3 home=${4:-$FM_HOME} lockdir lock_home lock_path lock_identity current_identity
-  lockdir="$state/.watch.lock"
-  lock_home=$(cat "$lockdir/fm-home" 2>/dev/null || true)
-  lock_path=$(cat "$lockdir/watcher-path" 2>/dev/null || true)
-  lock_identity=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
+# Match against an ALREADY-RESOLVED owner dir (see fm_lock_read_dir), not the
+# lockdir symlink. The lockdir can be swapped to a new owner (re-arm after a
+# steal) between separate reads of its pid/fm-home/watcher-path/pid-identity
+# files, each of which independently re-follows the symlink; a reader that
+# lands mid-swap can read fields from two different owners and see a live pid
+# with a mismatched identity even though each owner's own files are internally
+# consistent (fm-watch.sh publishes them atomically). Resolving the owner once
+# and reading every field from that fixed path removes that cross-owner tear:
+# a straggling reader either sees one owner's fully-consistent data or, if that
+# owner is mid-teardown, a clean absent read - never a chimera of two owners.
+fm_watcher_lock_owner_matches() {
+  local ownerdir=$1 watch_path=$2 pid=$3 home=$4 lock_home lock_path lock_identity current_identity
+  [ -n "$ownerdir" ] || return 1
+  lock_home=$(cat "$ownerdir/fm-home" 2>/dev/null || true)
+  lock_path=$(cat "$ownerdir/watcher-path" 2>/dev/null || true)
+  lock_identity=$(cat "$ownerdir/pid-identity" 2>/dev/null || true)
   [ "$lock_home" = "$home" ] || return 1
   [ "$lock_path" = "$watch_path" ] || return 1
   [ -n "$lock_identity" ] || return 1
@@ -63,20 +73,48 @@ fm_watcher_lock_matches_pid() {
   [ "$current_identity" = "$lock_identity" ]
 }
 
+fm_watcher_lock_matches_pid() {
+  local state=$1 watch_path=$2 pid=$3 home=${4:-$FM_HOME} lockdir ownerdir
+  lockdir="$state/.watch.lock"
+  ownerdir=$(fm_lock_read_dir "$lockdir" 2>/dev/null) || return 1
+  fm_watcher_lock_owner_matches "$ownerdir" "$watch_path" "$pid" "$home"
+}
+
+# A beacon within grace proves SOME watcher is genuinely alive and beating; if
+# the pid/identity resolution still fails against that live beacon, the
+# straggler is almost always a sub-millisecond release/re-arm handoff (the
+# outgoing owner's own EXIT trap tearing down its owner dir while a reader is
+# mid-resolve, or a brand-new owner publishing right as a reader lands) rather
+# than a genuinely dead watcher, so a few tight retries ride out the handoff
+# instead of reporting a false "no live watcher". A stale beacon short-circuits
+# without retrying: age does not shrink on its own, so retrying it can only add
+# latency to a real "no live watcher" report, never change its outcome.
+FM_WATCHER_HEALTHY_RETRIES=${FM_WATCHER_HEALTHY_RETRIES:-4}
+FM_WATCHER_HEALTHY_RETRY_SLEEP=${FM_WATCHER_HEALTHY_RETRY_SLEEP:-0.02}
+
 FM_WATCHER_HEALTHY_PID=
 fm_watcher_healthy() {
-  local state=$1 watch_path=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME} lockdir beat pid age
+  local state=$1 watch_path=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME} \
+        lockdir beat pid age ownerdir attempt=0
   FM_WATCHER_HEALTHY_PID=
   lockdir="$state/.watch.lock"
   beat="$state/.last-watcher-beat"
-  pid=$(cat "$lockdir/pid" 2>/dev/null || true)
-  fm_pid_alive "$pid" || return 1
-  fm_watcher_lock_matches_pid "$state" "$watch_path" "$pid" "$home" || return 1
-  age=$(fm_path_age "$beat")
-  [ "$age" -lt "$grace" ] || return 1
-  # shellcheck disable=SC2034 # Read by callers after fm_watcher_healthy returns.
-  FM_WATCHER_HEALTHY_PID=$pid
-  return 0
+  while :; do
+    ownerdir=$(fm_lock_read_dir "$lockdir" 2>/dev/null) || ownerdir=
+    if [ -n "$ownerdir" ]; then
+      pid=$(cat "$ownerdir/pid" 2>/dev/null || true)
+      if fm_pid_alive "$pid" && fm_watcher_lock_owner_matches "$ownerdir" "$watch_path" "$pid" "$home"; then
+        age=$(fm_path_age "$beat")
+        [ "$age" -lt "$grace" ] || return 1
+        # shellcheck disable=SC2034 # Read by callers after fm_watcher_healthy returns.
+        FM_WATCHER_HEALTHY_PID=$pid
+        return 0
+      fi
+    fi
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt "$FM_WATCHER_HEALTHY_RETRIES" ] || return 1
+    sleep "$FM_WATCHER_HEALTHY_RETRY_SLEEP"
+  done
 }
 
 fm_lock_clean_known_files() {
@@ -119,6 +157,24 @@ fm_lock_link_owner() {
     /*) printf '%s\n' "$owner" ;;
     *) printf '%s/%s\n' "$(dirname "$lockdir")" "$owner" ;;
   esac
+}
+
+# Resolve the directory to read a lock's published fields from. The real
+# production shape is $lockdir as a symlink to a separate owner dir (see
+# fm_lock_link_owner) that fm_lock_try_create publishes atomically; some lock
+# fixtures instead lay pid/fm-home/watcher-path/pid-identity directly inside
+# $lockdir as a plain directory, which is also accepted by treating $lockdir
+# as its own owner. Callers resolve this ONCE and read every field from the
+# returned path, instead of re-resolving $lockdir per field: see
+# fm_watcher_lock_owner_matches for why that is what closes the read-side race.
+fm_lock_read_dir() {
+  local lockdir=$1
+  if [ -L "$lockdir" ]; then
+    fm_lock_link_owner "$lockdir"
+    return
+  fi
+  [ -d "$lockdir" ] || return 1
+  printf '%s\n' "$lockdir"
 }
 
 fm_lock_points_to_owner() {

@@ -444,6 +444,111 @@ test_lock_prep_fn_publishes_atomically_before_ln() {
   pass "lock prep_fn content publishes atomically with pid, never observable half-written"
 }
 
+test_watcher_healthy_survives_read_side_lock_swap() {
+  # Regression for the SECOND (read-side) fm-turnend-guard.sh false positive,
+  # distinct from the write-side race test_lock_prep_fn_publishes_atomically_before_ln
+  # closed: fm_watcher_healthy used to read pid, fm-home, watcher-path, and
+  # pid-identity via four SEPARATE $state/.watch.lock/<file> accesses, each
+  # independently re-following the lock symlink. A reader landing between two
+  # of those reads while a re-arm swapped that symlink to a fresh owner (e.g.
+  # stealing a dead watcher's lock) could combine fields from two different,
+  # individually consistent owners and misreport a live, fresh-beacon watcher
+  # as mismatched. fm_watcher_healthy now resolves the owner dir ONCE per call
+  # (fm_lock_read_dir) and reads every field from that fixed path, so a
+  # concurrent swap can no longer tear a read across two owners.
+  #
+  # Deterministic reproduction, mirroring the write-side sibling's technique of
+  # widening a normally-instantaneous window instead of guessing at timing: arm
+  # a real watcher (owner A) through bin/fm-watch-arm.sh, resolve its owner dir
+  # exactly once the way fm_watcher_healthy does internally, THEN swap the
+  # published lock to a second, unrelated (dead) owner B before reading any of
+  # A's fields from the already-resolved path. The pinned snapshot must still
+  # describe owner A consistently, and a FRESH fm_watcher_healthy call made
+  # after the swap must correctly report owner B's dead, mismatched state as
+  # unhealthy - the fix must not blind the guard to a real "no live watcher".
+  local dir state fakebin armout armpid i lock_pid snapshot ownerB dead_pid
+  local home_a identity_a lock_home lock_path lock_identity
+  dir=$(make_case read-side-swap)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+
+  # Phase 1: arm a real watcher and confirm it live + fresh - the "arm, then
+  # immediately check" production sequence, on the real published lock.
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if ! grep -qF 'watcher: started pid=' "$armout" 2>/dev/null; then
+    kill "$armpid" 2>/dev/null || true
+    wait "$armpid" 2>/dev/null || true
+    fail "arm did not confirm a started watcher"
+  fi
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+
+  if ! FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_watcher_healthy "$2" "$3" 300' _ "$LIB" "$state" "$WATCH"; then
+    kill "$armpid" "$lock_pid" 2>/dev/null || true
+    wait "$armpid" 2>/dev/null || true
+    fail "fm_watcher_healthy reported unhealthy immediately after a real arm confirmed a live, fresh, matched watcher"
+  fi
+
+  # Phase 2: resolve owner A's directory exactly once, the way
+  # fm_watcher_healthy does internally, BEFORE anything swaps the lock.
+  snapshot=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_lock_read_dir "$2/.watch.lock"' _ "$LIB" "$state")
+  if [ -z "$snapshot" ] || [ ! -d "$snapshot" ]; then
+    kill "$armpid" "$lock_pid" 2>/dev/null || true
+    wait "$armpid" 2>/dev/null || true
+    fail "fm_lock_read_dir did not resolve owner A's directory"
+  fi
+  home_a=$(cat "$snapshot/fm-home" 2>/dev/null || true)
+  identity_a=$(cat "$snapshot/pid-identity" 2>/dev/null || true)
+  if [ -z "$identity_a" ]; then
+    kill "$armpid" "$lock_pid" 2>/dev/null || true
+    wait "$armpid" 2>/dev/null || true
+    fail "owner A's published identity was empty"
+  fi
+
+  # Phase 3: kill the real watcher and swap the published lock to a second,
+  # unrelated (dead, mismatched) owner B - simulating the instant a re-arm's
+  # self-heal steal has just completed, exactly what a straggling reader's
+  # unpinned per-field reads used to be able to tear across.
+  kill -9 "$lock_pid" 2>/dev/null || true
+  kill "$armpid" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+  dead_pid=999999
+  while kill -0 "$dead_pid" 2>/dev/null; do dead_pid=$((dead_pid + 1)); done
+  ownerB="$dir/owner-b"
+  mkdir -p "$ownerB"
+  printf '%s\n' "$dead_pid" > "$ownerB/pid"
+  printf 'owner-b-home\n' > "$ownerB/fm-home"
+  printf 'owner-b-watch.sh\n' > "$ownerB/watcher-path"
+  printf 'owner-b-identity\n' > "$ownerB/pid-identity"
+  rm -f "$state/.watch.lock"
+  ln -s "$ownerB" "$state/.watch.lock"
+
+  # Phase 4 (the regression assertion): fields read from the SNAPSHOT resolved
+  # in phase 2, before the swap, must still describe owner A consistently -
+  # never a mix picked up from owner B after the swap.
+  lock_home=$(cat "$snapshot/fm-home" 2>/dev/null || true)
+  lock_path=$(cat "$snapshot/watcher-path" 2>/dev/null || true)
+  lock_identity=$(cat "$snapshot/pid-identity" 2>/dev/null || true)
+  [ "$lock_home" = "$home_a" ] || fail "snapshot fm-home crossed over to owner B after the lock swap"
+  [ "$lock_path" = "$WATCH" ] || fail "snapshot watcher-path crossed over to owner B after the lock swap"
+  [ "$lock_identity" = "$identity_a" ] || fail "snapshot pid-identity crossed over to owner B after the lock swap"
+
+  # Phase 5: a FRESH fm_watcher_healthy call, made now that the lock genuinely
+  # points at dead owner B, must still fire.
+  if FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_watcher_healthy "$2" "$3" 300' _ "$LIB" "$state" "$WATCH"; then
+    fail "fm_watcher_healthy reported healthy against a genuinely dead, mismatched owner"
+  fi
+
+  pass "fm_watcher_healthy: a resolved owner snapshot stays pinned across a concurrent lock swap, and still fires on a genuinely dead watcher"
+}
+
 test_watch_restart_rejects_reused_pid() {
   local dir state fakebin out live pid i lock_pid
   dir=$(make_case restart-reused-pid)
@@ -777,6 +882,7 @@ test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
 test_lock_prep_fn_publishes_atomically_before_ln
+test_watcher_healthy_survives_read_side_lock_swap
 test_watch_restart_rejects_reused_pid
 test_watch_restart_reports_healthy_peer_without_attaching
 test_watcher_self_evicts_on_lock_takeover
