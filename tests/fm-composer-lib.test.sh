@@ -125,6 +125,26 @@ test_real_text_is_pending() {
   pass "fm_composer_classify_content: real unsubmitted text reads pending (including a popup argument-hint fill)"
 }
 
+# --- Queued-message hint reads empty, always, regardless of caller idle_re ---
+# fm-send false-negative incident: a busy pane accepts a steer as a QUEUED
+# message and clears its composer, but shows this hint - and the old
+# classifier had no way to know it was not real unsubmitted text.
+
+test_queued_hint_is_empty_standalone_and_inline() {
+  local out
+  # Standalone: the hint row carries no leading agent glyph at all.
+  out=$(classify 0 'Press up to edit queued messages')
+  [ "$out" = empty ] || fail "a standalone queued-message hint row should read empty, got '$out'"
+  # Inline: the hint appears right after the agent prompt glyph.
+  out=$(classify 0 '❯ Press up to edit queued messages')
+  [ "$out" = empty ] || fail "the queued-message hint after a bare glyph should read empty, got '$out'"
+  out=$(classify 1 '> Press up to edit queued messages')
+  [ "$out" = empty ] || fail "the queued-message hint inside a bordered composer should read empty, got '$out'"
+  # No caller idle_re was supplied for any of the above - recognition is
+  # built in, not dependent on a per-harness idle placeholder regex.
+  pass "fm_composer_classify_content: the queued-message hint reads empty standalone or inline, without a caller idle_re"
+}
+
 test_bare_shell_glyphs_are_unknown
 test_stripped_unbordered_content_uses_plain_content
 test_bare_shell_prompt_with_command_is_not_empty
@@ -134,3 +154,4 @@ test_empty_content_is_empty
 test_idle_placeholder_is_empty
 test_idle_placeholder_case_mode_is_explicit
 test_real_text_is_pending
+test_queued_hint_is_empty_standalone_and_inline

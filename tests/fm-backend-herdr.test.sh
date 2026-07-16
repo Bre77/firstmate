@@ -1066,6 +1066,90 @@ test_composer_state_codex_non_faint_same_text_is_pending() {
   pass "fm_backend_herdr_composer_state: non-faint codex prompt text still reads pending"
 }
 
+# --- composer_state: queued-message false-negative (fm-send steer to a busy
+# pane accepts the text as a QUEUED message, clears the composer, and shows
+# "Press up to edit queued messages" - the old classifier misread this as
+# unsubmitted composer text and fm-send reported the swallowed-Enter error on
+# a steer that had actually landed) -------------------------------------------
+
+test_composer_state_claude_queued_hint_below_bare_prompt_is_empty() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-claude-queued-hint-below"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n\xe2\x9d\xaf\n  Press up to edit queued messages\n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n  Sonnet 5                80%%\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "a genuinely empty bare '❯' composer with the queued-message hint on the row below should read empty, got '$out'"
+  pass "fm_backend_herdr_composer_state: the queued-message hint below an empty bare '❯' row still reads empty"
+}
+
+test_composer_state_claude_queued_hint_standalone_row_is_empty() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-claude-queued-hint-standalone"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # The queued-message hint IS the bottom-most row, with no leading ❯ glyph at
+  # all (the composer's own prompt is not re-drawn while a message is
+  # queued) - the widened bare-shape scan must still select this row instead
+  # of falling through to 'unknown' or a stale row further up.
+  printf '\xe2\x9c\xbb Brewed for 2m 40s\n\n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n  Press up to edit queued messages\n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "a standalone queued-message hint row with no leading glyph should read empty, got '$out'"
+  pass "fm_backend_herdr_composer_state: a standalone queued-message hint row (no leading glyph) reads empty"
+}
+
+test_composer_state_claude_queued_hint_does_not_mask_real_text_below_it() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-claude-queued-hint-then-real-text"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # The queued-message hint from an EARLIER queued send sits above the live
+  # composer, which now genuinely holds new unsubmitted text - the
+  # bottom-most-match rule must keep favoring the real, later row.
+  printf '  Press up to edit queued messages\n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n\xe2\x9d\xaf one more thing captain\n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = pending ] || fail "real unsubmitted text below a stale queued-message hint must still win (pending), got '$out'"
+  pass "fm_backend_herdr_composer_state: real typed text below a stale queued-message hint still reads pending"
+}
+
+# --- composer_state: narrow-pane capture requests unwrapped logical lines ----
+# A narrow pane word-wraps a long footer/composer row into extra PHYSICAL
+# lines: this can split a bordered row's closing border, or a dim ANSI run's
+# opening/closing code, across two captured lines (each processed
+# independently, so the second inherits none of the first's ANSI state), or
+# simply inflate the row count enough to push the live composer row out of
+# the bounded tail window. --source recent-unwrapped returns LOGICAL lines
+# regardless of terminal width, sidestepping all three.
+
+test_composer_state_requests_recent_unwrapped_capture() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-recent-unwrapped"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n\xe2\x9d\xaf\n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "sanity: the fixture itself should read empty, got '$out'"
+  assert_contains "$(cat "$log")" $'\x1f''--source'$'\x1f''recent-unwrapped'$'\x1f''--lines' \
+    "composer_state must capture with --source recent-unwrapped, not the width-dependent 'recent', so narrow-pane word-wrap cannot break row detection"
+  pass "fm_backend_herdr_composer_state: captures with --source recent-unwrapped so narrow-pane wrapping cannot break composer-row detection"
+}
+
+test_capture_ansi_and_plain_pass_through_an_explicit_source() {
+  local dir log resp fb out
+  # fm_backend_herdr_capture/_ansi default to 'recent' (every pre-existing
+  # caller, e.g. fm-peek/fm-watch, wants the human-legible wrapped shape) but
+  # accept an explicit [source] override, which composer_state relies on.
+  dir="$TMP_ROOT/capture-explicit-source"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf 'a\nb\nc\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_capture default:w1:p2 250 recent-unwrapped' "$ROOT" )
+  [ "$out" = $'a\nb\nc' ] || fail "capture with an explicit source should still pass through pane read output, got '$out'"
+  assert_contains "$(cat "$log")" "HERDR_SESSION=default"$'\x1f''pane'$'\x1f''read'$'\x1f''w1:p2'$'\x1f''--source'$'\x1f''recent-unwrapped'$'\x1f''--lines'$'\x1f''250' \
+    "capture did not honor an explicit [source] override"
+  pass "fm_backend_herdr_capture: an explicit [source] argument overrides the default 'recent'"
+}
+
 # --- wait_for_working: the native agent-state poll-and-classify primitive ---
 # Direct unit coverage for fm_backend_herdr_wait_for_working, the helper
 # fm_backend_herdr_send_text_submit now uses instead of composer scraping
@@ -2026,6 +2110,7 @@ test_normalize_key
 test_capture_calls_pane_read
 test_capture_works_around_small_lines_bug
 test_capture_preserves_pane_read_failure
+test_capture_ansi_and_plain_pass_through_an_explicit_source
 test_send_key_normalizes_and_targets_pane
 test_kill_is_best_effort
 test_current_path_reads_cwd
@@ -2049,6 +2134,10 @@ test_composer_state_grok_bright_truecolor_real_text_is_pending
 test_composer_state_codex_bare_prompt_glyph_is_empty
 test_composer_state_codex_faint_suggestion_is_empty
 test_composer_state_codex_non_faint_same_text_is_pending
+test_composer_state_claude_queued_hint_below_bare_prompt_is_empty
+test_composer_state_claude_queued_hint_standalone_row_is_empty
+test_composer_state_claude_queued_hint_does_not_mask_real_text_below_it
+test_composer_state_requests_recent_unwrapped_capture
 test_wait_for_working_returns_busy_on_first_poll
 test_wait_for_working_catches_a_slow_transition_mid_window
 test_wait_for_working_samples_budget_endpoint_without_final_sleep

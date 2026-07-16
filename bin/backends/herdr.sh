@@ -626,7 +626,9 @@ fm_backend_herdr_send_key() {  # <target> <key>
 
 # fm_backend_herdr_capture: bounded plain-text pane capture. Mirrors
 # fm-peek.sh's/fm-watch.sh's `tmux capture-pane -p -t T -S -N`. --source recent
-# is the closest herdr analogue to tmux's scrollback-bounded capture.
+# is the closest herdr analogue to tmux's scrollback-bounded capture, and is
+# the default (matching how every existing caller peeks/watches a pane as a
+# human would see it, terminal-width wrapping included).
 #
 # Verified CLI quirk (herdr-verification-p2.md "pane read --lines bug", v0.7.1):
 # `pane read --source recent --lines N` returns COMPLETELY EMPTY output when N
@@ -637,23 +639,28 @@ fm_backend_herdr_send_key() {  # <target> <key>
 # the composer-state guard/fallback reads around submit and injection). Workaround:
 # always request a generous fetch far above any realistic viewport height, then
 # trim to the caller's requested bound ourselves with `tail`.
-fm_backend_herdr_capture() {  # <target> <lines>
+#
+# [source] lets fm_backend_herdr_composer_state opt into `recent-unwrapped`
+# (see its own call site) so a narrow pane's word-wrap cannot inflate physical
+# row counts and push the live composer row out of the tail window; every
+# other caller keeps the default `recent` (human-legible, wrapped) shape.
+fm_backend_herdr_capture() {  # <target> <lines> [source]
   fm_backend_herdr_target_ready "$1" || return 1
-  local lines=${2:-200} fetch out
+  local lines=${2:-200} source=${3:-recent} fetch out
   case "$lines" in ''|*[!0-9]*) lines=200 ;; esac
   fetch=$lines
   case "$fetch" in ''|*[!0-9]*) fetch=200 ;; *) [ "$fetch" -ge 200 ] || fetch=200 ;; esac
-  out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" --source recent --lines "$fetch" 2>/dev/null) || return 1
+  out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" --source "$source" --lines "$fetch" 2>/dev/null) || return 1
   printf '%s' "$out" | tail -n "$lines"
 }
 
-fm_backend_herdr_capture_ansi() {  # <target> <lines>
+fm_backend_herdr_capture_ansi() {  # <target> <lines> [source]
   fm_backend_herdr_target_ready "$1" || return 1
-  local lines=${2:-200} fetch out
+  local lines=${2:-200} source=${3:-recent} fetch out
   case "$lines" in ''|*[!0-9]*) lines=200 ;; esac
   fetch=$lines
   case "$fetch" in ''|*[!0-9]*) fetch=200 ;; *) [ "$fetch" -ge 200 ] || fetch=200 ;; esac
-  out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" --source recent --lines "$fetch" --format ansi 2>/dev/null) || return 1
+  out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" --source "$source" --lines "$fetch" --format ansi 2>/dev/null) || return 1
   printf '%s' "$out" | tail -n "$lines"
 }
 
@@ -685,10 +692,15 @@ fm_backend_herdr_strip_ansi() {  # <text>
 #              "Incident (2026-07-07)"): the row's TRIMMED content starts with
 #              one of the verified agent-specific prompt glyphs but carries no
 #              closing border at all - claude's own live input row is a bare
-#              "❯ …" with no surrounding │, and codex's is a bare "› …". Both
-#              harnesses ALSO render bordered decorative boxes elsewhere (a
-#              startup welcome banner, an update-available notice) that
-#              satisfy the bordered shape above; requiring a match on EITHER
+#              "❯ …" with no surrounding │, and codex's is a bare "› …". Also
+#              matches a bare row that IS the known queued-message hint text
+#              (FM_COMPOSER_QUEUED_HINT_RE, bin/fm-composer-lib.sh) even with
+#              no leading glyph, since a busy pane can render that hint on its
+#              own row in place of the prompt glyph while the composer itself
+#              is genuinely empty. Both harnesses ALSO render bordered
+#              decorative boxes elsewhere (a startup welcome banner, an
+#              update-available notice) that satisfy the bordered shape
+#              above; requiring a match on EITHER
 #              shape and keeping the last (bottom-most) one is what keeps the
 #              live composer winning over a stale decorative box still sitting
 #              in the same capture window - a bordered box is only ever
@@ -700,10 +712,10 @@ fm_backend_herdr_strip_ansi() {  # <text>
 #
 #   empty   - blank, a bare prompt glyph, known ghost/placeholder text
 #             ("Type a message...", verified grok 0.2.82's empty-composer
-#             placeholder), or only de-emphasised ANSI ghost/placeholder text
-#             recognized by the shared fm_composer_strip_ghost extractor
-#             (dim/faint or dark-TRUECOLOR foreground). Safe to treat as
-#             submitted.
+#             placeholder), the known queued-message hint text, or only
+#             de-emphasised ANSI ghost/placeholder text recognized by the
+#             shared fm_composer_strip_ghost extractor (dim/faint or
+#             dark-TRUECOLOR foreground). Safe to treat as submitted.
 #   pending - real, unsubmitted text sits in the composer. This deliberately
 #             also covers a slash-command popup that just closed but only
 #             auto-completed or filled an argument-hint placeholder into the
@@ -734,8 +746,14 @@ FM_BACKEND_HERDR_BARE_PROMPT_RE=${FM_BACKEND_HERDR_BARE_PROMPT_RE:-'^[❯›]'}
 
 fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
   local target=$1 cap line trimmed found=0 shape="" raw_match="" bordered=0 stripped
-  cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES" 2>/dev/null \
-    || fm_backend_herdr_capture "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES") || { printf 'unknown'; return 0; }
+  # recent-unwrapped: capture LOGICAL lines, not terminal-width-wrapped
+  # physical rows, so a narrow pane's word-wrap cannot split a single
+  # composer/footer row across two captured lines (losing the border's
+  # closing glyph, or an ANSI de-emphasis run's opening/closing code, mid-row)
+  # or inflate the row count enough to push the live composer row out of the
+  # bounded tail window entirely.
+  cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES" recent-unwrapped 2>/dev/null \
+    || fm_backend_herdr_capture "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES" recent-unwrapped) || { printf 'unknown'; return 0; }
   # Structural scan: locate the bottom-most composer row and remember its RAW
   # (styled) bytes. Shape detection runs on the plain row (fm_backend_herdr_strip_ansi
   # keeps ghost text so the border/prompt glyph is still visible); the raw row is
@@ -752,7 +770,8 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
         found=1
         ;;
       *)
-        if printf '%s' "$trimmed" | grep -qE "$FM_BACKEND_HERDR_BARE_PROMPT_RE"; then
+        if printf '%s' "$trimmed" | grep -qE "$FM_BACKEND_HERDR_BARE_PROMPT_RE" \
+          || printf '%s' "$trimmed" | grep -qF "$FM_COMPOSER_QUEUED_HINT_RE"; then
           shape=bare
           raw_match=$line
           found=1
@@ -782,8 +801,9 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
   fi
   # Delegate the empty/pending/unknown decision to the shared owner. The bare
   # shape only ever starts with an AGENT glyph (FM_BACKEND_HERDR_BARE_PROMPT_RE
-  # is '^[❯›]'), so a bare shell prompt never reaches here - it stays 'unknown'
-  # via the no-composer-row path above, exactly as before.
+  # is '^[❯›]') or is the known queued-message hint row (FM_COMPOSER_QUEUED_HINT_RE,
+  # bin/fm-composer-lib.sh), so a bare shell prompt never reaches here - it
+  # stays 'unknown' via the no-composer-row path above, exactly as before.
   fm_composer_classify_content "$bordered" "$stripped" "$FM_BACKEND_HERDR_IDLE_RE"
 }
 

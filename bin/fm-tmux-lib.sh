@@ -85,6 +85,13 @@ fm_tmux_strip_ghost() { fm_composer_strip_ghost; }
 # (bin/fm-composer-lib.sh). The bordered flag is what lets a bordered `│ > │`
 # (claude's own idle composer) read empty while a bare, unbordered `$ ` dead-shell
 # prompt reads unknown.
+#
+# Queued-message hint / narrow-pane note: this reads ONE row at tmux's own
+# `#{cursor_y}`, which tmux computes correctly regardless of terminal width -
+# unlike herdr's composer_state, there is no multi-row tail-window scan for a
+# narrow pane's word-wrap to inflate or push the composer row out of. A queued
+# hint landing on the cursor row itself is already covered by the shared
+# classifier's FM_COMPOSER_QUEUED_HINT_RE.
 fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
   local target=$1 cy raw plain stripped bordered=0
   cy=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || { printf 'unknown'; return 0; }
