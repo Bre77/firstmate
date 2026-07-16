@@ -165,6 +165,15 @@ fm_composer_strip_ghost() {
   '
 }
 
+# FM_COMPOSER_QUEUED_HINT_RE: the fleet-wide, ALWAYS-recognized "message
+# queued, not yet handed to the agent" hint text: a busy pane can accept a
+# steer as a queued message and clear the composer while still showing this
+# hint, which is a genuine empty composer, not unsubmitted text. Checked
+# independent of any caller-supplied idle_re, exactly like the ❯/› agent
+# glyphs below, so every adapter routing through this shared classifier
+# reads it as empty.
+FM_COMPOSER_QUEUED_HINT_RE=${FM_COMPOSER_QUEUED_HINT_RE:-'Press up to edit queued messages'}
+
 # fm_composer_classify_content: the single shared composer-content verdict.
 #   <bordered> 1 when <content> came from a genuine agent-composer container (a
 #              bordered composer box, or a structurally-identified bare AGENT
@@ -178,6 +187,7 @@ fm_composer_strip_ghost() {
 #              with or without the glyph both land.
 fm_composer_idle_matches() {
   local content=$1 idle_re=$2 idle_case=$3
+  printf '%s' "$content" | grep -qF "$FM_COMPOSER_QUEUED_HINT_RE" && return 0
   [ -n "$idle_re" ] || return 1
   case "$idle_case" in
     insensitive) printf '%s' "$content" | grep -qiE "$idle_re" ;;
