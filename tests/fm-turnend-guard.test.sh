@@ -204,28 +204,39 @@ test_hook_silent_when_no_work_in_flight() {
   pass "fm-turnend-guard: silent no-op with nothing in flight"
 }
 
-test_hook_blocks_when_fresh_beacon_has_no_live_lock() {
+test_hook_blocks_when_stale_beacon_has_no_live_lock() {
   local dir out status
-  dir=$(make_primary_dir "$TMP_ROOT/hook-fresh-no-lock")
+  dir=$(make_primary_dir "$TMP_ROOT/hook-stale-no-lock")
   : > "$dir/state/task1.meta"
-  touch "$dir/state/.last-watcher-beat"
+  touch -d '100 seconds ago' "$dir/state/.last-watcher-beat"
   out=$(run_hook "$dir" false); status=$?
-  expect_code 2 "$status" "hook must block when a fresh beacon has no live watcher lock"
+  expect_code 2 "$status" "hook must block when a beacon past re-arm grace has no live watcher lock"
   assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
-  pass "fm-turnend-guard: blocks when a fresh beacon has no live watcher lock"
+  pass "fm-turnend-guard: blocks when a beacon past re-arm grace has no live watcher lock"
 }
 
-test_hook_blocks_when_dead_lock_has_fresh_beacon() {
+test_hook_blocks_when_dead_lock_has_stale_beacon() {
   local dir dead out status
-  dir=$(make_primary_dir "$TMP_ROOT/hook-dead-lock-fresh")
+  dir=$(make_primary_dir "$TMP_ROOT/hook-dead-lock-stale")
   dead=$(nonexistent_pid)
   : > "$dir/state/task1.meta"
   record_watcher_lock "$dir" "$dead" "dead watcher identity"
+  touch -d '100 seconds ago' "$dir/state/.last-watcher-beat"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "hook must block when the watcher lock pid is dead and the beacon is past re-arm grace"
+  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
+  pass "fm-turnend-guard: blocks on a dead watcher lock once the beacon is past re-arm grace"
+}
+
+test_hook_silent_when_no_lock_but_beacon_within_rearm_grace() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-no-lock-rearm-grace")
+  : > "$dir/state/task1.meta"
   touch "$dir/state/.last-watcher-beat"
   out=$(run_hook "$dir" false); status=$?
-  expect_code 2 "$status" "hook must block when the watcher lock pid is dead despite a fresh beacon"
-  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
-  pass "fm-turnend-guard: blocks on a dead watcher lock even when the beacon is fresh"
+  expect_code 0 "$status" "hook must not block a fresh beacon with no lock within re-arm grace"
+  [ -z "$out" ] || fail "hook produced output for an in-flight re-arm within grace: $out"
+  pass "fm-turnend-guard: silent when no live lock but the beacon is within re-arm grace"
 }
 
 test_hook_silent_with_live_lock_and_fresh_beacon() {
@@ -410,15 +421,16 @@ test_hook_secondmate_reinvoke_recovery_loop() {
     fail "guard nagged a healthy secondmate at Stop #1: $out"
   }
   # The watcher exits on the wake (its normal lifecycle) and a SECOND child event
-  # lands. On the re-invoked recovery turn the secondmate must re-arm; if it did
-  # not, the guard blocks that turn's end and forces the re-arm (Stop #2).
+  # lands. A re-arm still within re-arm grace is not itself a failure to detect,
+  # so age the beacon past that window to model a re-arm that never happened; if
+  # the secondmate did not re-arm, the guard blocks that turn's end (Stop #2).
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
   rm -rf "$dir/state/.watch.lock"
   : > "$dir/state/child2.meta"
-  touch "$dir/state/.last-watcher-beat"
+  touch -d '100 seconds ago' "$dir/state/.last-watcher-beat"
   out=$(run_hook "$dir" false); status=$?
-  expect_code 2 "$status" "secondmate recovery turn must not end blind after the watcher exits (Stop #2)"
+  expect_code 2 "$status" "secondmate recovery turn must not end blind after the watcher exits and re-arm grace elapses (Stop #2)"
   assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
   pass "fm-turnend-guard: secondmate deferred-death recovery - silent while watched, forces re-arm once the watcher exits"
 }
@@ -890,8 +902,9 @@ test_predicate_unhealthy_stale_beacon
 test_predicate_healthy_fresh_beacon
 test_predicate_queue_pending_flag
 test_hook_silent_when_no_work_in_flight
-test_hook_blocks_when_fresh_beacon_has_no_live_lock
-test_hook_blocks_when_dead_lock_has_fresh_beacon
+test_hook_blocks_when_stale_beacon_has_no_live_lock
+test_hook_blocks_when_dead_lock_has_stale_beacon
+test_hook_silent_when_no_lock_but_beacon_within_rearm_grace
 test_hook_silent_with_live_lock_and_fresh_beacon
 test_hook_blocks_with_live_lock_and_stale_beacon
 test_hook_blocks_when_unhealthy_in_primary
