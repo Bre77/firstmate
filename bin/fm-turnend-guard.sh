@@ -116,6 +116,14 @@ fm_supervision_status "$STATE" "$GRACE"
 [ "$FM_SUP_IN_FLIGHT" -gt 0 ] || exit 0
 fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" && exit 0
 
+# A watcher that just fired a wake and exited leaves a fresh beacon with no
+# live lock for as long as its own re-arm takes to start and acquire a new
+# one - a real gap, since no watcher process exists yet to publish anything.
+# Tolerate a beacon still within one watcher cycle's worth of startup budget
+# as a re-arm plausibly in flight rather than blindness.
+REARM_GRACE=${FM_TURNEND_REARM_GRACE:-$(( ${FM_POLL:-15} + ${FM_SIGNAL_GRACE:-30} ))}
+[ "$(fm_path_age "$STATE/.last-watcher-beat")" -lt "$REARM_GRACE" ] && exit 0
+
 afk=0
 [ -e "$STATE/.afk" ] && afk=1
 x_mode=0

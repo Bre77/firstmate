@@ -29,7 +29,13 @@ If no task is in flight, it exits silently.
 If work is in flight, it requires `fm_watcher_healthy <state-dir> <watch-path> [grace-seconds] [home]` from `bin/fm-wake-lib.sh`.
 That is the same identity-matched live lock and fresh beacon check used by `bin/fm-watch-arm.sh`.
 A stale beacon blocks even if a watcher pid is still live.
-A fresh leftover beacon blocks if the watcher lock is missing, dead, or identity-mismatched.
+A fresh leftover beacon blocks if the watcher lock is missing, dead, or identity-mismatched, unless the beacon is still within the re-arm grace window described below.
+
+A watcher that just fired a wake and exited leaves a fresh beacon behind with no live lock for as long as its own re-arm takes to start and acquire a new one.
+That is a real gap, not a race: no watcher process exists yet during it, so there is nothing for `bin/fm-wake-lib.sh`'s lock-identity fixes to close.
+The guard therefore tolerates a beacon younger than `FM_TURNEND_REARM_GRACE`, which defaults to `FM_POLL` (15) plus `FM_SIGNAL_GRACE` (30) seconds, as a re-arm plausibly in flight and exits 0 rather than blocking.
+Once the beacon ages past that window the guard blocks exactly as before, so a truly dead watcher is still caught, only after up to `FM_TURNEND_REARM_GRACE` seconds instead of immediately.
+The captain approved that tradeoff on 2026-07-16: it eliminates a false fire that triggered on essentially every ordinary wake-and-exit re-arm cycle, in exchange for widening dead-watcher detection latency to at most `FM_TURNEND_REARM_GRACE` seconds, consistent with `bin/fm-guard.sh`'s own 300-second grace already tolerating a much wider window.
 
 `FM_STATE_OVERRIDE` wins over `FM_HOME/state`, and `FM_HOME` wins over repo-root `state/`.
 `FM_GUARD_GRACE` controls the beacon freshness window and defaults to 300 seconds.
