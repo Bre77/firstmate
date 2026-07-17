@@ -15,6 +15,13 @@ LIB="$ROOT/bin/fm-wake-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-watcher-lock-tests)
 
+mark_pr_check_migration_complete() {
+  local state=$1
+  printf '%s\n' fm-pr-check-migration-scan-v1 > "$state/.pr-check-migration-scan-v1"
+  printf '%s\n' fm-pr-check-migration-v1 > "$state/.pr-check-migration-v1"
+  chmod 0600 "$state/.pr-check-migration-scan-v1" "$state/.pr-check-migration-v1"
+}
+
 
 test_singleton_start() {
   local dir state fakebin out1 out2 pid1 pid2 live i
@@ -23,6 +30,7 @@ test_singleton_start() {
   fakebin="$dir/fakebin"
   out1="$dir/watch-one.out"
   out2="$dir/watch-two.out"
+  mark_pr_check_migration_complete "$state"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out1" &
   pid1=$!
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out2" &
@@ -37,6 +45,11 @@ test_singleton_start() {
     i=$((i + 1))
   done
   [ "$live" -eq 1 ] || fail "expected exactly one live watcher, got $live"
+  i=0
+  while [ "$i" -lt 50 ] && ! grep -h 'watcher: already running pid ' "$out1" "$out2" >/dev/null 2>&1; do
+    sleep 0.02
+    i=$((i + 1))
+  done
   grep -h 'watcher: already running pid ' "$out1" "$out2" >/dev/null || fail "second watcher did not report existing singleton"
   kill "$pid1" "$pid2" 2>/dev/null || true
   wait "$pid1" 2>/dev/null || true
@@ -83,6 +96,7 @@ test_live_stale_watch_lock_is_actionable() {
   fakebin="$dir/fakebin"
   out="$dir/watch.out"
   err="$dir/watch.err"
+  mark_pr_check_migration_complete "$state"
   mkdir "$state/.watch.lock"
   printf '%s\n' "$$" > "$state/.watch.lock/pid"
   touch -t 200001010000 "$state/.last-watcher-beat"
@@ -555,6 +569,7 @@ test_watch_restart_rejects_reused_pid() {
   state="$dir/state"
   fakebin="$dir/fakebin"
   out="$dir/restart.out"
+  mark_pr_check_migration_complete "$state"
   sleep 300 &
   live=$!
   mkdir "$state/.watch.lock"
@@ -592,6 +607,7 @@ test_watch_restart_reports_healthy_peer_without_attaching() {
   state="$dir/state"
   fakebin="$dir/fakebin"
   out="$dir/restart.out"
+  mark_pr_check_migration_complete "$state"
   node -e 'process.on("SIGTERM", () => {}); setTimeout(() => {}, 300000)' &
   peer=$!
   identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") || fail "could not identify peer pid"
@@ -761,18 +777,23 @@ test_arm_propagates_immediate_wake_before_confirmation() {
   armout="$dir/arm.out"
   drain_out="$dir/drain.out"
   check_file="$state/task.check.sh"
+  printf '%s\n' fm-pr-check-migration-scan-v1 > "$state/.pr-check-migration-scan-v1"
+  printf '%s\n' fm-pr-check-migration-v1 > "$state/.pr-check-migration-v1"
+  chmod 0600 "$state/.pr-check-migration-scan-v1" "$state/.pr-check-migration-v1"
   cat > "$check_file" <<'SH'
 #!/usr/bin/env bash
 printf 'merged: https://example.test/pr/7\n'
 SH
-  chmod +x "$check_file"
+  chmod 0700 "$check_file"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" task >/dev/null \
+    || fail "could not register immediate-wake custom check"
   rc=0
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=0 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" || rc=$?
   [ "$rc" -eq 0 ] || fail "arm returned non-zero for an immediate wake (status $rc): $(cat "$armout")"
   grep -F "check: $check_file: merged: https://example.test/pr/7" "$armout" >/dev/null || fail "arm did not propagate the immediate check wake"
   ! grep -qF 'watcher: FAILED' "$armout" || fail "arm printed FAILED after a valid immediate wake"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after immediate arm wake failed"
-  grep "$(printf '\tcheck\t')" "$drain_out" | grep -F "$check_file" | grep -F 'merged: https://example.test/pr/7' >/dev/null || fail "immediate arm wake was not queued"
+  grep "$(printf '\tcheck\t')" "$drain_out" | grep -F "$check_file" | grep -F 'merged: https://example.test/pr/7' >/dev/null || fail "immediate check wake was not queued"
   pass "arm propagates an immediate watcher wake before confirmation"
 }
 
@@ -782,6 +803,7 @@ test_arm_waits_for_peer_beacon_after_child_stands_down() {
   state="$dir/state"
   fakebin="$dir/fakebin"
   armout="$dir/arm.out"
+  mark_pr_check_migration_complete "$state"
   sleep 300 &
   peer=$!
   identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") || fail "could not identify peer pid"
@@ -822,6 +844,7 @@ test_arm_fails_loud_when_no_fresh_watcher_confirmable() {
   state="$dir/state"
   fakebin="$dir/fakebin"
   armout="$dir/arm.out"
+  mark_pr_check_migration_complete "$state"
   sleep 300 &
   live=$!
   # A live process holds the lock but is NOT a confirmable watcher (no identity),

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Tests for the secondmate-vs-crewmate harness split, the optional model/effort
 # tokens config/secondmate-harness carries alongside the harness, and the
-# primary->secondmate inheritable-config propagation.
+# primary->secondmate inherited local-material propagation.
 #
 # Three capabilities are under test:
 #   A) Harness split. config/secondmate-harness sets the harness the PRIMARY uses
@@ -676,8 +676,9 @@ test_spawn_fallback_chain_and_crew_scout_unaffected() {
 }
 
 # ===========================================================================
-# B integration: spawn, bootstrap, and config push propagate inheritable config
-# and keep it converged on the primary (independent of tracked-file ff status).
+# B integration: spawn, bootstrap, and config push propagate inherited local
+# material and keep it converged on the primary (independent of tracked-file ff
+# status).
 # ===========================================================================
 
 # A PRIMARY firstmate repo on main with one commit + a home dir, mirroring the
@@ -759,9 +760,9 @@ run_config_push() {
     "$ROOT/bin/fm-config-push.sh"
 }
 
-# The sweep pushes the primary's inheritable config into a live home, re-converges
-# it when the primary changes it, and mirrors absence when the primary clears it -
-# all while never inheriting secondmate-harness.
+# The sweep pushes the primary's declared inherited config into a live home,
+# re-converges it when the primary changes it, and mirrors absence when the
+# primary clears it - all while never inheriting secondmate-harness.
 test_bootstrap_sweep_propagates_and_reconverges() {
   local w c1
   w=$(new_world boot-prop)
@@ -783,7 +784,7 @@ test_bootstrap_sweep_propagates_and_reconverges() {
   [ -e "$w/sm/config/secondmate-harness" ] \
     && fail "sweep: secondmate-harness was inherited (must not be)"
 
-  # Re-converge: primary changes inheritable values; the home follows on the next sweep.
+  # Re-converge: primary changes inherited config values; the home follows on the next sweep.
   printf '{"default":{"harness":"claude"}}\n' > "$w/home/config/crew-dispatch.json"
   printf 'claude\n' > "$w/home/config/crew-harness"
   printf 'tasks-axi\n' > "$w/home/config/backlog-backend"
@@ -795,7 +796,7 @@ test_bootstrap_sweep_propagates_and_reconverges() {
   [ "$(cat "$w/sm/config/backlog-backend" 2>/dev/null)" = tasks-axi ] \
     || fail "sweep: home did not re-converge to the primary's new backlog-backend"
 
-  # Mirror absence: primary clears inheritable config; the home's copies are removed.
+  # Mirror absence: primary clears inherited config; the home's copies are removed.
   rm -f "$w/home/config/crew-dispatch.json" "$w/home/config/crew-harness" "$w/home/config/backlog-backend"
   run_bootstrap "$w" >/dev/null
   [ -e "$w/sm/config/crew-dispatch.json" ] \
@@ -857,7 +858,7 @@ test_bootstrap_sweep_defers_dispatch_on_stale_unignored_home() {
   pass "B9 bootstrap sweep defers new inherited config until the home ignores it"
 }
 
-# Backward-compat: with no inheritable config set, the sweep is a no-op for the
+# Backward-compat: with no inherited config set, the sweep is a no-op for the
 # home's config/ - exactly as before this feature - and ordinary sweep behavior
 # (fast-forward) is unaffected.
 test_bootstrap_sweep_no_inheritance_is_noop() {
@@ -879,7 +880,7 @@ test_bootstrap_sweep_no_inheritance_is_noop() {
   [ -e "$w/sm/config" ] && fail "no-inheritance sweep created a home config/ dir"
   [ "$(git -C "$w/sm" rev-parse HEAD)" = "$head" ] \
     || fail "no-inheritance sweep did not still fast-forward the tracked files"
-  pass "B10 bootstrap sweep with no inheritable config is a config no-op and still fast-forwards"
+  pass "B10 bootstrap sweep with no inherited config is a config no-op and still fast-forwards"
 }
 
 test_bootstrap_sweep_surfaces_config_propagation_failure() {
@@ -891,8 +892,8 @@ test_bootstrap_sweep_surfaces_config_propagation_failure() {
 
   out=$(run_bootstrap "$w")
 
-  fail_line=$(printf '%s\n' "$out" | grep '^SECONDMATE_SYNC: secondmate sm: skipped: config inheritance failed' || true)
-  [ -n "$fail_line" ] || fail "bootstrap did not surface config propagation failure (got: $out)"
+  fail_line=$(printf '%s\n' "$out" | grep '^SECONDMATE_SYNC: secondmate sm: skipped: inheritance failed' || true)
+  [ -n "$fail_line" ] || fail "bootstrap did not surface inheritance propagation failure (got: $out)"
   [ -d "$w/sm/config/crew-harness" ] || fail "failed propagation removed the wrong path"
   pass "B11 bootstrap sweep surfaces config propagation failures"
 }
@@ -920,7 +921,7 @@ test_config_push_propagates_reports_without_ff_or_nudge() {
   out=$(run_config_push "$w" 2>"$err"); status=$?
 
   expect_code 0 "$status" "config push should succeed"
-  assert_contains "$out" "config-push: $w/home/config -> live secondmate homes" \
+  assert_contains "$out" "config-push: $w/home -> live secondmate homes" \
     "config push lacked the header"
   assert_contains "$out" "secondmate sm ($sm_real):" \
     "config push did not discover the live secondmate through registry fallback"
@@ -978,7 +979,7 @@ test_config_push_reports_skips_dirty_and_invalid_home() {
   expect_code 0 "$status" "warnings-only config push should exit zero"
   assert_contains "$out" "secondmate dirty ($dirty_real):" \
     "config push did not report dirty home"
-  assert_contains "$out" "home: dirty working tree - config-only push continuing" \
+  assert_contains "$out" "home: dirty working tree - local-material push continuing" \
     "config push did not surface dirty state"
   assert_contains "$out" "secondmate stale ($stale_real):" \
     "config push did not report stale home"

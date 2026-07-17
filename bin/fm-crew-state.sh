@@ -153,7 +153,7 @@ pane_readable() {  # <target>
 # which is a narrower signal than "this crew's turn/tool call is still in
 # progress". A crew blocked on its own long-running foreground tool call (e.g.
 # `no-mistakes axi run` without --yes, which blocks synchronously until a gate
-# or outcome - AGENTS.md section 11) is not generating for that whole span, so
+# or outcome - AGENTS.md section 7) is not generating for that whole span, so
 # agent.get can read idle/blocked (bin/backends/herdr.sh maps both to `idle`)
 # while the pane's own rendered text still shows the harness's busy banner
 # (BUSY_REGEX, e.g. "esc to interrupt") for the entire tool call, exactly like

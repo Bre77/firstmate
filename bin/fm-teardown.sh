@@ -23,11 +23,17 @@
 # teardown refuses rather than risk discarding unlanded work.
 # Uncommitted changes are never landed.
 # local-only projects additionally accept work merged into the local default
-# branch (firstmate performs that merge on the captain's approval) as a fallback
+# branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
 # declared scratch and the report at data/<task-id>/report.md is the work
-# product - teardown proceeds once the report exists, and refuses without it.
+# product. Teardown proceeds only once the report exists and the shared
+# unresolved-decision completion gate verifies its captain-held inventory.
+# Before destructive cleanup, teardown validates task check artifacts and any
+# matching quarantine entries as ordinary single-link files on the state
+# device. It refuses and preserves task state when that proof fails; otherwise
+# it removes the task's check, trust record, PR sidecar, publication record, and
+# quarantine entries with the rest of the volatile state.
 # Orca tasks use the same safety checks, then close the recorded terminal and
 # remove the recorded worktree through `orca worktree rm`; teardown never guesses
 # an Orca target from ambient CLI state.
@@ -90,13 +96,19 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-lock-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
+if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
+  echo "error: invalid teardown request" >&2
+  exit 2
+fi
+ID=$1
+FORCE=${2:-}
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never tear
 # down a worktree (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
 FM_LOCK_LOG_PREFIX=teardown
 "$FM_ROOT/bin/fm-guard.sh" || true
-ID=$1
-FORCE=${2:-}
 
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
@@ -174,6 +186,76 @@ remove_grok_turnend_auth() {
   case "$token" in ''|*[!A-Za-z0-9._-]*) return 0 ;; esac
   hooks_dir="${GROK_HOME:-$HOME/.grok}/hooks/fm-turn-end.d"
   rm -f "$hooks_dir/$token"
+}
+
+validate_pr_poll_cleanup() {
+  local state_dir=$1 id=$2 quarantine state_device artifact has_artifact=0
+  fm_task_id_path_safe "$id" || return 0
+  quarantine="$state_dir/.pr-check-quarantine"
+  if [ "$id" = _noncanonical ] \
+    && { [ -e "$quarantine/_noncanonical.diagnostic.pending-noncanonical" ] \
+      || [ -L "$quarantine/_noncanonical.diagnostic.pending-noncanonical" ] \
+      || [ -e "$quarantine/_noncanonical.diagnostic.noncanonical" ] \
+      || [ -L "$quarantine/_noncanonical.diagnostic.noncanonical" ]; }; then
+    echo "REFUSED: legacy PR-check quarantine migration is incomplete; preserving task state." >&2
+    return 1
+  fi
+  for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
+    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.check-trust"; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    has_artifact=1
+  done
+  if [ -e "$quarantine" ] || [ -L "$quarantine" ]; then
+    has_artifact=1
+  fi
+  [ "$has_artifact" -eq 1 ] || return 0
+  [ -d "$state_dir" ] && [ ! -L "$state_dir" ] || return 1
+  state_device=$(fm_pr_file_device "$state_dir") || return 1
+  for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
+    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.check-trust"; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    if [ ! -f "$artifact" ] || [ -L "$artifact" ] \
+      || [ "$(fm_pr_file_device "$artifact")" != "$state_device" ] \
+      || [ "$(fm_pr_file_link_count "$artifact")" != 1 ]; then
+      echo "REFUSED: unsafe task PR-check artifact; preserving task state." >&2
+      return 1
+    fi
+  done
+  [ -e "$quarantine" ] || [ -L "$quarantine" ] || return 0
+  if [ ! -d "$state_dir" ] || [ -L "$state_dir" ] \
+    || [ ! -d "$quarantine" ] || [ -L "$quarantine" ]; then
+    echo "REFUSED: unsafe PR-check quarantine path $quarantine; preserving task state." >&2
+    return 1
+  fi
+  if [ "$(fm_pr_file_device "$quarantine")" != "$state_device" ] \
+    || [ "$(fm_pr_file_mode "$quarantine")" != 700 ]; then
+    echo "REFUSED: PR-check quarantine is not on the task state device; preserving task state." >&2
+    return 1
+  fi
+  for artifact in "$quarantine/$id."*; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    if ! fm_pr_private_file_valid "$artifact" 600 "$state_device"; then
+      echo "REFUSED: unsafe task quarantine entry; preserving task state." >&2
+      return 1
+    fi
+  done
+}
+
+remove_pr_poll_artifacts() {
+  local state_dir=$1 id=$2 quarantine artifact
+  validate_pr_poll_cleanup "$state_dir" "$id" || return 1
+  rm -f "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
+    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.check-trust" || return 1
+  if fm_task_id_path_safe "$id"; then
+    quarantine="$state_dir/.pr-check-quarantine"
+    if [ -d "$quarantine" ] && [ ! -L "$quarantine" ]; then
+      for artifact in "$quarantine/$id."*; do
+        [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+        rm -f -- "$artifact" || return 1
+      done
+      rmdir "$quarantine" 2>/dev/null || true
+    fi
+  fi
 }
 
 # Resolve the PR number for a worktree branch via gh-axi. Echoes the number on a
@@ -835,6 +917,7 @@ validate_firstmate_home_children_removal() {
   for child_meta in "$sub_state"/*.meta; do
     [ -e "$child_meta" ] || continue
     child_id=$(basename "$child_meta" .meta)
+    validate_pr_poll_cleanup "$sub_state" "$child_id" || return 1
     child_wt=$(meta_value "$child_meta" worktree)
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
@@ -921,7 +1004,8 @@ cleanup_firstmate_home_children() {
       fi
     fi
     remove_grok_turnend_auth "$sub_state" "$child_id"
-    rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.check.sh" "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.grok-turnend-token"
+    remove_pr_poll_artifacts "$sub_state" "$child_id" || return 1
+    rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.grok-turnend-token"
   done
 }
 
@@ -932,6 +1016,8 @@ remove_secondmate_registry_entry() {
   grep -vE "^- $id( |$)" "$SECONDMATE_REG" > "$tmp" || true
   mv "$tmp" "$SECONDMATE_REG"
 }
+
+validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
@@ -962,6 +1048,12 @@ if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
   if [ ! -f "$REPORT" ]; then
     echo "REFUSED: scout task $ID has no report at $REPORT." >&2
     echo "The report is the work product. Have the crewmate write it, or use --force after explicit discard approval." >&2
+    exit 1
+  fi
+  if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-decision-hold.sh" verify "$ID" >/dev/null; then
+    echo "REFUSED: scout task $ID has not passed the unresolved-decision completion gate." >&2
+    echo "Inventory its report and any visual review through bin/fm-decision-hold.sh before teardown." >&2
     exit 1
   fi
 fi
@@ -1043,7 +1135,8 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
-rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token"
+remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
+rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token"
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi

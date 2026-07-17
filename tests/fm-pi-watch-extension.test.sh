@@ -7,6 +7,10 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-pi-watch-extension)
 EXT="$ROOT/.pi/extensions/fm-primary-pi-watch.ts"
+# Node 24 warns when these test-only dynamic imports load tracked ESM plugins
+# from a clean checkout with no tracked .opencode/package.json. The warning is
+# unrelated to plugin output, which the assertions intentionally require empty.
+export NODE_NO_WARNINGS=1
 
 install_pi_watch_extension_fixture() {
   local repo=$1
@@ -121,7 +125,7 @@ if (!notification.includes("started Pi extension arm child")) {
   console.error(notification);
   process.exit(1);
 }
-for (let i = 0; i < 50 && !prompt; i += 1) {
+for (let i = 0; i < 250 && !prompt; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
 if (!prompt.includes("FIRSTMATE WATCHER WAKE")) {
@@ -290,9 +294,12 @@ EOF
 }
 
 test_opencode_primary_watch_plugin_static_wiring() {
-  local plugin text
+  local plugin module_boundary text
   plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  module_boundary="$ROOT/.opencode/plugins/package.json"
   assert_present "$plugin" "OpenCode primary watch plugin missing"
+  assert_present "$module_boundary" "OpenCode plugin ESM package boundary missing"
+  assert_contains "$(cat "$module_boundary")" '"type": "module"' "OpenCode plugin package boundary is not explicitly ESM"
   text=$(cat "$plugin")
   assert_contains "$text" "session.idle" "OpenCode plugin does not listen for session.idle"
   assert_contains "$text" "fm-watch-arm.sh" "OpenCode plugin does not spawn the watcher arm"
@@ -303,6 +310,25 @@ test_opencode_primary_watch_plugin_static_wiring() {
   assert_contains "$text" 'fm-watch-arm.sh" --restart' "OpenCode plugin does not restart into its own watcher child"
   assert_contains "$text" 'setArmStatus("external")' "OpenCode plugin still treats an external healthy watcher as armed"
   pass "OpenCode primary watcher plugin has the verified TUI wake wiring"
+}
+
+test_opencode_plugin_package_boundary_is_explicit_esm() {
+  local fixture plugin out status
+  fixture="$TMP_ROOT/opencode-esm-boundary/.opencode"
+  plugin="$fixture/plugins/fm-primary-watch-arm.js"
+  mkdir -p "$fixture/plugins"
+  printf '%s\n' '{"dependencies":{}}' > "$fixture/package.json"
+  cp "$ROOT/.opencode/plugins/package.json" "$fixture/plugins/package.json"
+  cp "$ROOT/.opencode/plugins/fm-primary-watch-arm.js" "$plugin"
+  out=$(PLUGIN="$plugin" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+await import(pathToFileURL(process.env.PLUGIN).href);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode plugin must import beneath an explicit ESM package boundary"
+  [ -z "$out" ] || fail "OpenCode ESM boundary import printed output: $out"
+  pass "OpenCode plugins have an explicit ESM boundary even under a typeless parent package"
 }
 
 test_opencode_primary_watch_plugin_uses_effective_state_home() {
@@ -716,6 +742,7 @@ test_pi_tool_returns_agent_tool_result
 test_pi_process_exit_cleanup_listener_lifecycle
 test_pi_process_exit_cleanup_stops_arm_child
 test_opencode_primary_watch_plugin_static_wiring
+test_opencode_plugin_package_boundary_is_explicit_esm
 test_opencode_primary_watch_plugin_uses_effective_state_home
 test_opencode_primary_watch_plugin_sources_effective_config
 test_opencode_primary_watch_plugin_requires_session_lock

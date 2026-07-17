@@ -3,8 +3,9 @@
 #
 # Inert by default: a HARD no-op (exit 0, no output) unless X mode is configured
 # via a non-empty FMX_PAIRING_TOKEN (from the home's .env or the environment).
-# This script is the body of the watcher check shim state/x-watch.check.sh, where
-# the contract is "output => wake firstmate, silence => keep sleeping", so the
+# The watcher invokes this trusted repository script directly only after
+# state/x-watch.check.sh matches the expected byte-static identity shim.
+# Its contract is "output => wake firstmate, silence => keep sleeping", so the
 # no-op keeps the watcher behaving exactly as today until a user opts in.
 #
 # Behavior when X mode is on:
@@ -41,15 +42,17 @@ ERROR_FILE="$STATE/x-poll.error"
 
 emit_error_once() {
   local msg=$1
-  mkdir -p "$STATE" 2>/dev/null || true
-  if [ -f "$ERROR_FILE" ] && [ "$(cat "$ERROR_FILE" 2>/dev/null)" = "$msg" ]; then
+  if fmx_private_artifact_file_valid "$STATE" "x-poll.error" 600 \
+    && [ "$(cat "$ERROR_FILE" 2>/dev/null)" = "$msg" ]; then
     return 0
   fi
-  printf '%s\n' "$msg" > "$ERROR_FILE" 2>/dev/null || true
+  printf '%s\n' "$msg" \
+    | fmx_private_artifact_publish_stdin "$STATE" "x-poll.error" 600 2>/dev/null || true
   printf 'x-mode-error %s\n' "$msg"
 }
 
 clear_error() {
+  fmx_private_artifact_dir_device "$STATE" >/dev/null 2>&1 || return 0
   rm -f "$ERROR_FILE" 2>/dev/null || true
 }
 
@@ -98,17 +101,10 @@ case "$REQ" in
 esac
 
 INBOX="$STATE/x-inbox"
-mkdir -p "$INBOX" 2>/dev/null || { emit_error_once "cannot create inbox"; exit 0; }
 # Stash the full mention object atomically so a concurrent reader never sees a
 # half-written file.
-if jq '.' "$BODY_FILE" > "$INBOX/$REQ.json.tmp" 2>/dev/null; then
-  if ! mv -f "$INBOX/$REQ.json.tmp" "$INBOX/$REQ.json" 2>/dev/null; then
-    rm -f "$INBOX/$REQ.json.tmp"
-    emit_error_once "cannot write inbox"
-    exit 0
-  fi
-else
-  rm -f "$INBOX/$REQ.json.tmp"
+if ! (set -o pipefail; jq '.' "$BODY_FILE" 2>/dev/null \
+  | fmx_private_artifact_publish_stdin "$INBOX" "$REQ.json" 600); then
   emit_error_once "cannot write inbox"
   exit 0
 fi
