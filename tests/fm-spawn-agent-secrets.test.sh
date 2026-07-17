@@ -66,6 +66,16 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" treehouse
+  # This file's baselines pin the launch command before fm-spawn.sh's separate,
+  # unrelated per-crew memory cap (see tests/fm-crew-memory-cap.test.sh) wraps
+  # it in `systemd-run --user --scope`. A fake failing systemd-run keeps that
+  # wrap out of scope here regardless of whether the host running this suite
+  # has a reachable user systemd instance.
+  cat > "$fakebin/systemd-run" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/systemd-run"
   printf '%s\n' "$fakebin"
 }
 

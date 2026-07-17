@@ -1,26 +1,31 @@
 #!/usr/bin/env bash
-# Tests for bin/fm-pr-check.sh and bin/fm-pr-activity-poll.sh: the tracked-PR
-# poll that must surface BOTH merge state and new PR activity (issue comments,
-# inline review comments, review summaries) from anyone, as a check: wake.
+# Tests for bin/fm-pr-activity-poll.sh (fork-only) and its wiring into the
+# watcher's per-task check loop (bin/fm-watch.sh), which is the ONLY caller of
+# this script in production: whenever fm-pr-poll.sh's static merge check finds
+# a tracked PR still open, the watcher additionally runs the activity poll to
+# surface new issue comments, inline review comments, and review summaries
+# from anyone, as a check: wake. fm-pr-check.sh itself never touches the
+# activity watermark; it only arms the byte-static merge poll
+# (tests/fm-pr-check-security.test.sh owns that mechanism).
 #
 # Matrix:
-#   (a) arming a fresh task creates state/<id>.pr-activity-seen set to "now",
-#       so a pre-arm history of old items never floods the first poll
-#   (b) re-arming an existing task preserves its watermark instead of resetting it
-#   (c) a poll surfaces new items across all three kinds (comment, review-comment,
-#       review), formats them as `pr-comment <id> <author> (<kind>): <text>`,
-#       filters out anything at/before the watermark, and advances the
-#       watermark to the newest item's timestamp
+#   (a) re-arming an existing task never resets its activity watermark, since
+#       fm-pr-check.sh does not manage it at all
+#   (b) the activity-poll script defensively initializes a missing watermark
+#       and stays silent on that first run (no pre-arm history flood)
+#   (c) a direct poll surfaces new items across all three kinds (comment,
+#       review-comment, review), formats them as
+#       `pr-comment <id> <author> (<kind>): <text>`, filters out anything
+#       at/before the watermark, and advances the watermark to the newest
+#       item's timestamp
 #   (d) a long comment body is truncated to ~120 chars in the wake line
-#   (e) merge takes precedence: once merged the check reports "merged" and
-#       never invokes the activity poll (no gh api calls at all)
-#   (f) a legacy merge-only check.sh (pre-dating the activity poll) still works
-#       untouched until fm-pr-check.sh re-arms it
-#   (g) re-arming a legacy task upgrades its check.sh to include the activity poll
-#   (h) the activity-poll script defensively initializes a missing watermark
-#       and stays silent on that first run, mirroring the arm-time contract
-#   (i) a gh api error response (its JSON error body lands on stdout, not just
+#   (e) a gh api error response (its JSON error body lands on stdout, not just
 #       stderr, on a non-2xx status) must never be treated as activity data
+#   (f) the watcher runs the activity poll and surfaces a `pr-comment` wake
+#       line only when the tracked PR is still open
+#   (g) merge takes precedence in the watcher: once merged, the merge poll
+#       reports "merged" and the watcher never invokes the activity poll (no
+#       gh api calls at all)
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -28,26 +33,34 @@ set -u
 
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 ACTIVITY_POLL="$ROOT/bin/fm-pr-activity-poll.sh"
+WATCH="$ROOT/bin/fm-watch.sh"
+BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 TMP_ROOT=$(fm_test_tmproot fm-pr-check-tests)
 
-# Builds a fresh case dir with a state dir and a fakebin. Echoes the case dir.
+# Builds a fresh case dir with a home (state/data/config), a task meta, and a
+# fakebin. Echoes the case dir.
 make_case() {
   local name=$1 case_dir
   case_dir="$TMP_ROOT/$name"
-  mkdir -p "$case_dir/state" "$case_dir/fakebin" "$case_dir/fixtures"
+  mkdir -p "$case_dir/home/state" "$case_dir/home/data" "$case_dir/home/config" \
+    "$case_dir/fakebin" "$case_dir/fixtures"
+  fm_write_meta "$case_dir/home/state/task-x.meta" \
+    "window=fm-task-x" \
+    "kind=ship" \
+    "mode=no-mistakes"
   printf '%s\n' "$case_dir"
 }
 
-# write_gh_mock <fakebin>: a `gh` stub covering both call shapes this feature
-# needs - `pr view ... --json state|headRefOid` for merge detection, and
-# `api <path> ... -q <expr>` for activity polling. The api branch runs the
-# REAL jq against a fixture file selected by path, executing the actual jq
-# expression the script under test built - not a canned response - so a bug in
-# that expression fails the test instead of hiding behind a dumb mock.
-# FM_TEST_PR_STATE (default OPEN), FM_TEST_PR_HEAD, FM_TEST_FIXTURE_ISSUE_COMMENTS,
-# FM_TEST_FIXTURE_REVIEW_COMMENTS, FM_TEST_FIXTURE_REVIEWS, and
-# FM_TEST_GH_API_FAIL=1 (simulate a non-2xx response whose error body still
-# lands on stdout) are read at call time.
+# write_gh_mock <fakebin>: a `gh` stub covering both call shapes the merge
+# check and the activity poll need - `pr view ... --json state|headRefOid`
+# for merge detection, and `api <path> ... -q <expr>` for activity polling.
+# The api branch runs the REAL jq against a fixture file selected by path,
+# executing the actual jq expression the script under test built - not a
+# canned response - so a bug in that expression fails the test instead of
+# hiding behind a dumb mock. FM_TEST_PR_STATE (default OPEN), FM_TEST_PR_HEAD,
+# FM_TEST_FIXTURE_ISSUE_COMMENTS, FM_TEST_FIXTURE_REVIEW_COMMENTS,
+# FM_TEST_FIXTURE_REVIEWS, and FM_TEST_GH_API_FAIL=1 (simulate a non-2xx
+# response whose error body still lands on stdout) are read at call time.
 write_gh_mock() {
   local fakebin=$1
   cat > "$fakebin/gh" <<'SH'
@@ -98,25 +111,32 @@ SH
 run_pr_check() {
   local case_dir=$1; shift
   FM_ROOT_OVERRIDE="$ROOT" \
-  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_HOME="$case_dir/home" \
+  FM_STATE_OVERRIDE="$case_dir/home/state" \
   FM_TEST_GH_LOG="$case_dir/gh.log" \
-  PATH="$case_dir/fakebin:$PATH" \
+  PATH="$case_dir/fakebin:$BASE_PATH" \
     "$PR_CHECK" "$@"
-}
-
-run_check_sh() {
-  local case_dir=$1 id=$2
-  PATH="$case_dir/fakebin:$PATH" \
-    bash "$case_dir/state/$id.check.sh"
 }
 
 run_activity_poll_directly() {
   local case_dir=$1; shift
   FM_ROOT_OVERRIDE="$ROOT" \
-  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_STATE_OVERRIDE="$case_dir/home/state" \
   FM_TEST_GH_LOG="$case_dir/gh.log" \
-  PATH="$case_dir/fakebin:$PATH" \
+  PATH="$case_dir/fakebin:$BASE_PATH" \
     "$ACTIVITY_POLL" "$@"
+}
+
+# Runs one bounded real watcher cycle against the real $ROOT (so the fork-only
+# bin/fm-pr-activity-poll.sh is reachable at its real path), bounded by a hard
+# wall-clock timeout so a hang never wedges the suite.
+run_watcher_bounded() {
+  local case_dir=$1 fakebin=$2
+  perl -e 'my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM}=sub { kill "TERM", $pid; waitpid $pid, 0; exit 124 }; alarm 5; waitpid $pid, 0; alarm 0; exit($? >> 8)' \
+    env FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_CHECK_INTERVAL=0 FM_CHECK_TIMEOUT=2 \
+      FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 \
+      FM_TEST_GH_LOG="$case_dir/gh.log" \
+      PATH="$fakebin:$BASE_PATH" "$WATCH"
 }
 
 # assert_iso8601 <file> <msg>: content must look like a UTC ISO 8601 stamp.
@@ -124,50 +144,33 @@ assert_iso8601() {
   grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' "$1" || fail "$2"
 }
 
-test_arm_sets_watermark_now_and_no_flood() {
-  local case_dir url
-  case_dir=$(make_case arm-fresh)
-  write_gh_mock "$case_dir/fakebin"
-  url="https://github.com/example/repo/pull/9"
-
-  run_pr_check "$case_dir" task-x1 "$url" > "$case_dir/arm.out" 2>&1 \
-    || fail "arm-fresh: fm-pr-check.sh should succeed"$'\n'"$(cat "$case_dir/arm.out")"
-
-  assert_present "$case_dir/state/task-x1.pr-activity-seen" \
-    "arm-fresh: watermark file must be created on first arm"
-  assert_iso8601 "$case_dir/state/task-x1.pr-activity-seen" \
-    "arm-fresh: watermark must look like a UTC ISO 8601 timestamp"
-
-  # An item dated long before "now" must not flood the very first poll.
-  cat > "$case_dir/fixtures/issue-comments.json" <<'JSON'
-[{"created_at":"2000-01-01T00:00:00Z","user":{"login":"oldbot"},"body":"ancient history"}]
-JSON
-  printf '[]' > "$case_dir/fixtures/review-comments.json"
-  printf '[]' > "$case_dir/fixtures/reviews.json"
-
-  local out
-  out=$(FM_TEST_FIXTURE_ISSUE_COMMENTS="$case_dir/fixtures/issue-comments.json" \
-        FM_TEST_FIXTURE_REVIEW_COMMENTS="$case_dir/fixtures/review-comments.json" \
-        FM_TEST_FIXTURE_REVIEWS="$case_dir/fixtures/reviews.json" \
-        run_check_sh "$case_dir" task-x1)
-  [ -z "$out" ] || fail "arm-fresh: pre-arm history must not flood the first poll (got: $out)"
-  pass "fm-pr-check.sh arms a fresh watermark at now and the first poll ignores pre-arm history"
-}
-
-test_rearm_preserves_existing_watermark() {
+test_rearm_does_not_touch_watermark() {
   local case_dir url
   case_dir=$(make_case rearm-preserve)
   write_gh_mock "$case_dir/fakebin"
   url="https://github.com/example/repo/pull/11"
-  mkdir -p "$case_dir/state"
-  printf '2020-05-05T05:05:05Z\n' > "$case_dir/state/task-x2.pr-activity-seen"
+  printf '2020-05-05T05:05:05Z\n' > "$case_dir/home/state/task-x.pr-activity-seen"
 
-  run_pr_check "$case_dir" task-x2 "$url" > /dev/null 2>&1 \
+  run_pr_check "$case_dir" task-x "$url" > /dev/null 2>&1 \
     || fail "rearm-preserve: fm-pr-check.sh should succeed"
 
-  assert_grep '2020-05-05T05:05:05Z' "$case_dir/state/task-x2.pr-activity-seen" \
-    "rearm-preserve: re-arming must not reset an existing watermark"
-  pass "fm-pr-check.sh preserves an existing watermark across a re-arm"
+  assert_grep '2020-05-05T05:05:05Z' "$case_dir/home/state/task-x.pr-activity-seen" \
+    "rearm-preserve: fm-pr-check.sh must never touch the activity watermark"
+  pass "fm-pr-check.sh never touches the activity watermark, on first arm or re-arm"
+}
+
+test_defensive_missing_watermark_initializes_silently() {
+  local case_dir out
+  case_dir=$(make_case defensive-init)
+  write_gh_mock "$case_dir/fakebin"
+
+  out=$(run_activity_poll_directly "$case_dir" task-x "https://github.com/example/repo/pull/71")
+  [ -z "$out" ] || fail "defensive-init: a first run with no watermark file must stay silent (got: $out)"
+  assert_present "$case_dir/home/state/task-x.pr-activity-seen" \
+    "defensive-init: the poll script must create the watermark itself when missing"
+  assert_iso8601 "$case_dir/home/state/task-x.pr-activity-seen" \
+    "defensive-init: the defensively-created watermark must look like a UTC ISO 8601 timestamp"
+  pass "fm-pr-activity-poll.sh defensively initializes a missing watermark and stays silent on that run"
 }
 
 test_poll_surfaces_new_activity_and_advances_watermark() {
@@ -175,10 +178,7 @@ test_poll_surfaces_new_activity_and_advances_watermark() {
   case_dir=$(make_case new-activity)
   write_gh_mock "$case_dir/fakebin"
   url="https://github.com/example/repo/pull/21"
-
-  run_pr_check "$case_dir" task-x3 "$url" > /dev/null 2>&1 \
-    || fail "new-activity: fm-pr-check.sh should succeed"
-  printf '2020-01-01T00:00:00Z\n' > "$case_dir/state/task-x3.pr-activity-seen"
+  printf '2020-01-01T00:00:00Z\n' > "$case_dir/home/state/task-x.pr-activity-seen"
 
   cat > "$case_dir/fixtures/issue-comments.json" <<'JSON'
 [
@@ -196,17 +196,17 @@ JSON
   out=$(FM_TEST_FIXTURE_ISSUE_COMMENTS="$case_dir/fixtures/issue-comments.json" \
         FM_TEST_FIXTURE_REVIEW_COMMENTS="$case_dir/fixtures/review-comments.json" \
         FM_TEST_FIXTURE_REVIEWS="$case_dir/fixtures/reviews.json" \
-        run_check_sh "$case_dir" task-x3)
+        run_activity_poll_directly "$case_dir" task-x "$url")
 
   assert_not_contains "$out" "oldbot" "new-activity: an item at/before the watermark must not surface"
-  assert_contains "$out" "pr-comment task-x3 brett (comment): a fresh captain comment on the artifact" \
+  assert_contains "$out" "pr-comment task-x brett (comment): a fresh captain comment on the artifact" \
     "new-activity: issue comment wake line must match the contract format"
-  assert_contains "$out" "pr-comment task-x3 maintainer (review-comment): inline nit: rename this" \
+  assert_contains "$out" "pr-comment task-x maintainer (review-comment): inline nit: rename this" \
     "new-activity: inline review comment wake line must match the contract format"
-  assert_contains "$out" "pr-comment task-x3 reviewer1 (review): CHANGES_REQUESTED" \
+  assert_contains "$out" "pr-comment task-x reviewer1 (review): CHANGES_REQUESTED" \
     "new-activity: a review with an empty body must fall back to its state"
 
-  assert_grep '2021-03-01T00:00:02Z' "$case_dir/state/task-x3.pr-activity-seen" \
+  assert_grep '2021-03-01T00:00:02Z' "$case_dir/home/state/task-x.pr-activity-seen" \
     "new-activity: watermark must advance to the newest surfaced item's timestamp"
   pass "poll surfaces new comments/review-comments/reviews from anyone, filters old items, and advances the watermark"
 }
@@ -216,10 +216,7 @@ test_wake_line_truncates_long_body() {
   case_dir=$(make_case long-body)
   write_gh_mock "$case_dir/fakebin"
   url="https://github.com/example/repo/pull/31"
-
-  run_pr_check "$case_dir" task-x4 "$url" > /dev/null 2>&1 \
-    || fail "long-body: fm-pr-check.sh should succeed"
-  printf '2020-01-01T00:00:00Z\n' > "$case_dir/state/task-x4.pr-activity-seen"
+  printf '2020-01-01T00:00:00Z\n' > "$case_dir/home/state/task-x.pr-activity-seen"
 
   long_body=$(printf 'x%.0s' $(seq 1 200))
   cat > "$case_dir/fixtures/issue-comments.json" <<JSON
@@ -231,7 +228,7 @@ JSON
   out=$(FM_TEST_FIXTURE_ISSUE_COMMENTS="$case_dir/fixtures/issue-comments.json" \
         FM_TEST_FIXTURE_REVIEW_COMMENTS="$case_dir/fixtures/review-comments.json" \
         FM_TEST_FIXTURE_REVIEWS="$case_dir/fixtures/reviews.json" \
-        run_check_sh "$case_dir" task-x4)
+        run_activity_poll_directly "$case_dir" task-x "$url")
 
   display=${out#*"(comment): "}
   [ "${#display}" -le 120 ] || fail "long-body: wake line body must be truncated to ~120 chars (got ${#display})"
@@ -239,101 +236,78 @@ JSON
   pass "a long comment body is truncated to ~120 chars in the wake line"
 }
 
-test_merge_takes_precedence_no_activity_poll() {
-  local case_dir url out
-  case_dir=$(make_case merge-precedence)
-  write_gh_mock "$case_dir/fakebin"
-  url="https://github.com/example/repo/pull/41"
-
-  run_pr_check "$case_dir" task-x5 "$url" > /dev/null 2>&1 \
-    || fail "merge-precedence: fm-pr-check.sh should succeed"
-
-  : > "$case_dir/gh.log"
-  out=$(FM_TEST_PR_STATE=MERGED FM_TEST_GH_LOG="$case_dir/gh.log" run_check_sh "$case_dir" task-x5)
-  [ "$out" = "merged" ] || fail "merge-precedence: a merged PR must report exactly 'merged' (got: $out)"
-  assert_no_grep 'api ' "$case_dir/gh.log" \
-    "merge-precedence: a merged PR must skip the activity poll entirely (no gh api calls)"
-  pass "merge detection takes precedence and short-circuits the activity poll once merged"
-}
-
-test_legacy_merge_only_check_still_works() {
-  local case_dir url
-  case_dir=$(make_case legacy-check)
-  write_gh_mock "$case_dir/fakebin"
-  url="https://github.com/example/repo/pull/51"
-  mkdir -p "$case_dir/state"
-  cat > "$case_dir/state/task-x6.check.sh" <<EOF
-state=\$(gh pr view "$url" --json state -q .state 2>/dev/null)
-[ "\$state" = "MERGED" ] && echo "merged"
-EOF
-
-  local out
-  out=$(run_check_sh "$case_dir" task-x6)
-  [ -z "$out" ] || fail "legacy-check: an un-merged legacy check.sh must stay silent (got: $out)"
-  out=$(FM_TEST_PR_STATE=MERGED run_check_sh "$case_dir" task-x6)
-  [ "$out" = "merged" ] || fail "legacy-check: a merged legacy check.sh must still report merged (got: $out)"
-  pass "a pre-upgrade merge-only check.sh keeps working untouched until re-armed"
-}
-
-test_rearm_upgrades_legacy_check_script() {
-  local case_dir url
-  case_dir=$(make_case legacy-upgrade)
-  write_gh_mock "$case_dir/fakebin"
-  url="https://github.com/example/repo/pull/61"
-  mkdir -p "$case_dir/state"
-  cat > "$case_dir/state/task-x7.check.sh" <<EOF
-state=\$(gh pr view "$url" --json state -q .state 2>/dev/null)
-[ "\$state" = "MERGED" ] && echo "merged"
-EOF
-
-  run_pr_check "$case_dir" task-x7 "$url" > /dev/null 2>&1 \
-    || fail "legacy-upgrade: fm-pr-check.sh should succeed"
-
-  assert_grep 'fm-pr-activity-poll.sh' "$case_dir/state/task-x7.check.sh" \
-    "legacy-upgrade: re-arming a legacy task must upgrade its check.sh to the activity poll"
-  assert_present "$case_dir/state/task-x7.pr-activity-seen" \
-    "legacy-upgrade: re-arming a legacy task must create its watermark"
-  pass "re-running fm-pr-check.sh upgrades an existing legacy task to the activity poll"
-}
-
-test_defensive_missing_watermark_initializes_silently() {
-  local case_dir out
-  case_dir=$(make_case defensive-init)
-  write_gh_mock "$case_dir/fakebin"
-  mkdir -p "$case_dir/state"
-
-  out=$(run_activity_poll_directly "$case_dir" task-x8 "https://github.com/example/repo/pull/71")
-  [ -z "$out" ] || fail "defensive-init: a first run with no watermark file must stay silent (got: $out)"
-  assert_present "$case_dir/state/task-x8.pr-activity-seen" \
-    "defensive-init: the poll script must create the watermark itself when missing"
-  assert_iso8601 "$case_dir/state/task-x8.pr-activity-seen" \
-    "defensive-init: the defensively-created watermark must look like a UTC ISO 8601 timestamp"
-  pass "fm-pr-activity-poll.sh defensively initializes a missing watermark and stays silent on that run"
-}
-
 test_gh_api_error_body_not_treated_as_activity() {
   local case_dir url out
   case_dir=$(make_case api-error)
   write_gh_mock "$case_dir/fakebin"
   url="https://github.com/example/repo/pull/81"
+  printf '2020-01-01T00:00:00Z\n' > "$case_dir/home/state/task-x.pr-activity-seen"
 
-  run_pr_check "$case_dir" task-x9 "$url" > /dev/null 2>&1 \
-    || fail "api-error: fm-pr-check.sh should succeed"
-  printf '2020-01-01T00:00:00Z\n' > "$case_dir/state/task-x9.pr-activity-seen"
-
-  out=$(FM_TEST_GH_API_FAIL=1 run_check_sh "$case_dir" task-x9)
+  out=$(FM_TEST_GH_API_FAIL=1 run_activity_poll_directly "$case_dir" task-x "$url")
   [ -z "$out" ] || fail "api-error: a non-2xx gh api response must never surface as activity (got: $out)"
-  assert_grep '2020-01-01T00:00:00Z' "$case_dir/state/task-x9.pr-activity-seen" \
+  assert_grep '2020-01-01T00:00:00Z' "$case_dir/home/state/task-x.pr-activity-seen" \
     "api-error: the watermark must not advance when gh api calls fail"
   pass "a gh api error response body is never mistaken for activity data"
 }
 
-test_arm_sets_watermark_now_and_no_flood
-test_rearm_preserves_existing_watermark
+test_watcher_merge_takes_precedence_no_activity_poll() {
+  local case_dir url out rc
+  case_dir=$(make_case watcher-merge-precedence)
+  write_gh_mock "$case_dir/fakebin"
+  url="https://github.com/example/repo/pull/41"
+
+  run_pr_check "$case_dir" task-x "$url" > /dev/null 2>&1 \
+    || fail "watcher-merge-precedence: fm-pr-check.sh should succeed"
+
+  : > "$case_dir/gh.log"
+  set +e
+  out=$(FM_TEST_PR_STATE=MERGED run_watcher_bounded "$case_dir" "$case_dir/fakebin")
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "watcher-merge-precedence: bounded watcher did not complete (rc=$rc): $out"
+  assert_contains "$out" "check: $case_dir/home/state/task-x.check.sh: merged" \
+    "watcher-merge-precedence: a merged PR must wake with exactly 'merged'"
+  assert_no_grep 'api ' "$case_dir/gh.log" \
+    "watcher-merge-precedence: a merged PR must skip the activity poll entirely (no gh api calls)"
+  pass "the watcher's merge poll takes precedence and short-circuits the activity poll once merged"
+}
+
+test_watcher_surfaces_pr_comment_when_open() {
+  local case_dir url out rc
+  case_dir=$(make_case watcher-open-activity)
+  write_gh_mock "$case_dir/fakebin"
+  url="https://github.com/example/repo/pull/51"
+
+  run_pr_check "$case_dir" task-x "$url" > /dev/null 2>&1 \
+    || fail "watcher-open-activity: fm-pr-check.sh should succeed"
+  printf '2020-01-01T00:00:00Z\n' > "$case_dir/home/state/task-x.pr-activity-seen"
+
+  cat > "$case_dir/fixtures/issue-comments.json" <<'JSON'
+[{"created_at":"2021-03-01T00:00:00Z","user":{"login":"brett"},"body":"a fresh captain comment on the artifact"}]
+JSON
+  printf '[]' > "$case_dir/fixtures/review-comments.json"
+  printf '[]' > "$case_dir/fixtures/reviews.json"
+
+  set +e
+  out=$(FM_TEST_PR_STATE=OPEN \
+        FM_TEST_FIXTURE_ISSUE_COMMENTS="$case_dir/fixtures/issue-comments.json" \
+        FM_TEST_FIXTURE_REVIEW_COMMENTS="$case_dir/fixtures/review-comments.json" \
+        FM_TEST_FIXTURE_REVIEWS="$case_dir/fixtures/reviews.json" \
+        run_watcher_bounded "$case_dir" "$case_dir/fakebin")
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "watcher-open-activity: bounded watcher did not complete (rc=$rc): $out"
+  assert_contains "$out" "pr-comment task-x brett (comment): a fresh captain comment on the artifact" \
+    "watcher-open-activity: an open PR's new comment must reach the watcher's wake line"
+  assert_grep 'pr view' "$case_dir/gh.log" \
+    "watcher-open-activity: the merge check must still have run before the activity poll"
+  pass "the watcher runs the activity poll and surfaces a new PR comment while the tracked PR is still open"
+}
+
+test_rearm_does_not_touch_watermark
+test_defensive_missing_watermark_initializes_silently
 test_poll_surfaces_new_activity_and_advances_watermark
 test_wake_line_truncates_long_body
-test_merge_takes_precedence_no_activity_poll
-test_legacy_merge_only_check_still_works
-test_rearm_upgrades_legacy_check_script
-test_defensive_missing_watermark_initializes_silently
 test_gh_api_error_body_not_treated_as_activity
+test_watcher_merge_takes_precedence_no_activity_poll
+test_watcher_surfaces_pr_comment_when_open

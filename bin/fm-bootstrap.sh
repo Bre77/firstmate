@@ -661,7 +661,7 @@ clickstack_webhook_setup() {
   shim="$STATE/clickstack-watch.check.sh"
 
   clickstack_remove_artifacts() {
-    rm -f "$shim" 2>/dev/null || true
+    rm -f "$shim" "$STATE/clickstack-watch.check-trust" 2>/dev/null || true
     [ ! -e "$shim" ]
   }
 
@@ -702,8 +702,9 @@ export FM_HOME=$(printf '%q' "$FM_HOME")
 exec $(printf '%q' "$FM_ROOT/bin/fm-clickstack-poll.sh")
 EOF
 )
-  write_if_changed "$shim" "$shim_body" || { clickstack_arm_failed; return 0; }
-  chmod +x "$shim" 2>/dev/null || { clickstack_arm_failed; return 0; }
+  x_mode_write_if_changed "$shim" "$shim_body" 700 || { clickstack_arm_failed; return 0; }
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$FM_ROOT/bin/fm-check-register.sh" clickstack-watch \
+    >/dev/null || { clickstack_arm_failed; return 0; }
 
   cshook_load_config
   echo "CLICKSTACK: webhook receiver on - inbox poll armed via state/clickstack-watch.check.sh; arm the listener on $CSHOOK_BIND:$CSHOOK_PORT with bin/fm-clickstack-arm.sh"
@@ -724,7 +725,7 @@ betterstack_webhook_setup() {
   shim="$STATE/betterstack-watch.check.sh"
 
   betterstack_remove_artifacts() {
-    rm -f "$shim" 2>/dev/null || true
+    rm -f "$shim" "$STATE/betterstack-watch.check-trust" 2>/dev/null || true
     [ ! -e "$shim" ]
   }
 
@@ -765,8 +766,9 @@ export FM_HOME=$(printf '%q' "$FM_HOME")
 exec $(printf '%q' "$FM_ROOT/bin/fm-betterstack-poll.sh")
 EOF
 )
-  write_if_changed "$shim" "$shim_body" || { betterstack_arm_failed; return 0; }
-  chmod +x "$shim" 2>/dev/null || { betterstack_arm_failed; return 0; }
+  x_mode_write_if_changed "$shim" "$shim_body" 700 || { betterstack_arm_failed; return 0; }
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$FM_ROOT/bin/fm-check-register.sh" betterstack-watch \
+    >/dev/null || { betterstack_arm_failed; return 0; }
 
   echo "BETTERSTACK: webhook route on - inbox poll armed via state/betterstack-watch.check.sh; arm the shared receiver and generate its token with bin/fm-betterstack-arm.sh"
 }
