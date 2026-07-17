@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# Push declared inheritable local config to live secondmate homes.
+# Push declared inherited local material to live secondmate homes.
 # Usage: fm-config-push.sh [--help]
 #
-# Config-only convergence for mid-session changes such as config/crew-dispatch.json
-# edits. This discovers live secondmate homes from state/*.meta, backfills
+# Mid-session convergence for inherited local material such as
+# config/crew-dispatch.json edits or data/captain-shared.md updates. This
+# discovers live secondmate homes from state/*.meta, backfills
 # home= from data/secondmates.md for older meta records, and reuses the same
-# propagate_inheritable_config machinery as bootstrap, but deliberately does not
+# propagation machinery as bootstrap, but deliberately does not
 # fast-forward tracked files and does not nudge running secondmates.
 # Warnings-only skips exit 0; real propagation errors exit non-zero.
 set -u
@@ -14,10 +15,10 @@ usage() {
   cat <<'EOF'
 Usage: fm-config-push.sh [--help]
 
-Push the primary firstmate home's declared inheritable local config into each
-live secondmate home's config/ directory.
+Push the primary firstmate home's declared inherited local material into each
+live secondmate home.
 
-This is config-only:
+This is local-material-only:
   - does not fast-forward tracked files
   - does not nudge secondmates
   - reports each live home and each inheritable item as pushed, unchanged,
@@ -32,6 +33,7 @@ Environment overrides follow the rest of firstmate:
   FM_HOME            active firstmate home
   FM_ROOT_OVERRIDE  firstmate repo root
   FM_STATE_OVERRIDE state dir
+  FM_DATA_OVERRIDE  data dir
   FM_CONFIG_OVERRIDE config dir
 EOF
 }
@@ -54,7 +56,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
-DATA="$FM_HOME/data"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 SECONDMATES_MD="$DATA/secondmates.md"
 
 "$SCRIPT_DIR/fm-guard.sh" || true
@@ -94,7 +96,7 @@ if [ ! -s "$records" ]; then
   exit 0
 fi
 
-echo "config-push: $CONFIG -> live secondmate homes"
+echo "config-push: $FM_HOME -> live secondmate homes"
 
 seen_homes=""
 errors=0
@@ -120,7 +122,7 @@ while IFS='|' read -r id home _window meta; do
   printf 'secondmate %s (%s):\n' "$id" "$home_real"
   dirty=$(dirty_status "$home_real" yes || true)
   if [ -n "$dirty" ]; then
-    echo "  home: dirty working tree - config-only push continuing"
+    echo "  home: dirty working tree - local-material push continuing"
   fi
 
   report=$(mktemp "${TMPDIR:-/tmp}/fm-config-push-report.XXXXXX" 2>/dev/null) || {
@@ -129,7 +131,7 @@ while IFS='|' read -r id home _window meta; do
     continue
   }
   reports="$reports $report"
-  if FM_CONFIG_INHERIT_REPORT="$report" propagate_inheritable_config "$CONFIG" "$home_real/config"; then
+  if FM_CONFIG_INHERIT_REPORT="$report" propagate_secondmate_inheritance "$FM_HOME" "$home_real" "$CONFIG" "$DATA"; then
     print_item_report "$report"
   else
     errors=1

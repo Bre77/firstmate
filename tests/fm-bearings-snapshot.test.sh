@@ -147,6 +147,9 @@ EOF
 ## In flight
 - [ ] mate - Decide subscription order (repo: firstmate) (kind: ship) (since 2026-07-11)
 
+## Queued
+- [ ] mate-decision-race - Choose subscription order (repo: firstmate) (kind: captain) (hold: captain choice pending) (hold-kind: captain)
+
 ## Done
 - [x] mate-landed - Secondmate-managed fix https://github.com/kunchenguid/firstmate/pull/50 (repo: firstmate) (kind: ship) (merged 2026-07-11)
 EOF
@@ -325,14 +328,15 @@ EOF
   fm_write_meta "$mate/state/phase8.meta" \
     "window=firstmate:fm-phase8" "worktree=$mate/projects/phase8" "project=sample" \
     "harness=codex" "kind=ship" "mode=no-mistakes"
-  printf 'working [key=phase8]: implementing Phase 8 parity\n' > "$mate/state/phase8.status"
+  printf 'working [key=phase8]: implementing Phase 8 parity\nneeds-decision [key=release]: choose release A or B\n' \
+    > "$mate/state/phase8.status"
   fakebin=$(make_fakebin "$home")
   json=$(run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e '
-    (.secondmates | any(.[]; .id == "domain-alpha" and .state == "active_child_work"
-      and (.doing | contains("phase8")) and (.doing | contains("Phase 7 started") | not)))
-      and (.in_flight | any(.[]; .id == "domain-alpha" and (.doing | contains("phase8"))))
-  ' >/dev/null || fail "active child did not override stale parent event: $json"
+    (.secondmates | any(.[]; .id == "domain-alpha" and .state != "captain_decision"
+      and (.doing | contains("release A or B") | not)))
+      and (.decisions_open | any(.owner == "domain-alpha") | not)
+  ' >/dev/null || fail "status-only child decision leaked into Bearings: $json"
   canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s' "$canonical" | jq -e '
@@ -342,7 +346,7 @@ EOF
       and .endpoint.freshness == "fresh"
       and .endpoint.observed_at == "2026-07-11T18:00:00Z"
   ' >/dev/null || fail "child endpoint observation lacked bounded current freshness: $canonical"
-  pass "active child work overrides an old parent event with fresh endpoint evidence"
+  pass "Bearings excludes a status-only child decision"
 }
 
 test_structured_child_decision_reaches_captains_call() {
@@ -356,6 +360,7 @@ test_structured_child_decision_reaches_captains_call() {
 - [ ] phase8 - Sample rollout Phase 8 (repo: sample) (kind: ship) (since 2026-07-13)
 
 ## Queued
+- [ ] phase8-decision-release - Choose sample release (repo: sample) (kind: captain) (hold: captain release choice pending) (hold-kind: captain)
 
 ## Done
 - [x] phase7 - Sample rollout Phase 7 (repo: sample) (kind: ship) (done 2026-07-12)
@@ -368,11 +373,11 @@ EOF
   json=$(run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e '
     (.secondmates | any(.[]; .id == "domain-alpha" and .state == "captain_decision"))
-      and (.decisions_open | any(.[]; .id == "domain-alpha/phase8" and .key == "release"
-        and .verb == "needs-decision" and (.summary | contains("release A or B"))))
+      and (.decisions_open | any(.[]; .id == "domain-alpha/phase8-decision-release"
+        and .key == "phase8-decision-release" and .verb == "captain-hold"))
       and (.in_flight | any(.[]; .id == "domain-alpha") | not)
-  ' >/dev/null || fail "structured child decision did not reach Captain Call: $json"
-  pass "a real structured child decision reaches Captain's Call"
+  ' >/dev/null || fail "structured child captain hold did not reach Captain Call: $json"
+  pass "a structured child captain hold reaches Captain's Call"
 }
 
 make_valid_secondmate_home() {  # <id> <home>
@@ -392,6 +397,19 @@ EOF
 append_secondmate_registry() {  # <parent> <id> <home>
   printf -- '- %s - fixture domain (home: %s; scope: fixture; projects: sample; added 2026-07-13)\n' \
     "$2" "$3" >> "$1/data/secondmates.md"
+}
+
+append_landed_row() {  # <secondmate-home> <id> <title> <date>
+  printf -- '- [x] %s - %s (repo: firstmate) (kind: ship) (merged %s)\n' \
+    "$2" "$3" "$4" >> "$1/data/backlog.md"
+}
+
+make_landed_secondmate() {  # <parent> <id>
+  local parent=$1 id=$2 mate
+  mate="$TMP_ROOT/$(basename "$parent")-$id-home"
+  make_valid_secondmate_home "$id" "$mate"
+  append_secondmate_registry "$parent" "$id" "$mate"
+  printf '%s\n' "$mate"
 }
 
 write_parent_secondmate_event() {  # <parent> <id> <home> <note>
@@ -860,9 +878,10 @@ test_open_decision_surfaces_end_to_end() {
   fakebin=$(make_fakebin "$home")
   json=$(run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e '
-    .decisions_open | any(.[]; .id == "mate" and .key == "race" and .verb == "needs-decision")
-  ' >/dev/null || fail "a still-open decision masked by a later done must surface in decisions_open: $json"
-  pass "an open decision masked by a later event surfaces end-to-end"
+    .decisions_open | any(.[]; .id == "mate/mate-decision-race"
+      and .key == "mate-decision-race" and .verb == "captain-hold")
+  ' >/dev/null || fail "an authoritative captain hold must surface in decisions_open: $json"
+  pass "an authoritative captain hold surfaces end-to-end"
 }
 
 test_report_pointers_surface() {
@@ -950,6 +969,7 @@ write_large_fixture() {  # <home> <count>
     mkdir -p "$home/projects/$id" "$home/data/$id"
     printf '# Report\n' > "$home/data/$id/report.md"
     printf -- '- [ ] gate-%s - Gate %s blocked-by: task-%s (repo: repo-%s) (kind: ship)\n' "$i" "$i" "$i" "$i" >> "$home/data/backlog.md"
+    printf -- '- [ ] decision-%s - Decision %s (repo: repo-%s) (kind: captain) (hold: captain choice pending) (hold-kind: captain)\n' "$i" "$i" "$i" >> "$home/data/backlog.md"
     fm_write_meta "$home/state/$id.meta" \
       "window=firstmate:fm-$id" \
       "worktree=$home/projects/$id" \
@@ -1100,6 +1120,166 @@ test_landed_includes_secondmate_home_merges() {
   pass "landed includes secondmate-managed merges alongside main-home merges"
 }
 
+test_landed_default_balances_dominant_and_sparse_homes() {
+  local home dominant sparse_a sparse_b sparse_c fakebin json i actual expected
+  home=$(make_home landed-balanced-default)
+  : > "$home/data/secondmates.md"
+  printf '## Done\n' > "$home/data/backlog.md"
+  dominant=$(make_landed_secondmate "$home" dominant)
+  sparse_a=$(make_landed_secondmate "$home" sparse-a)
+  sparse_b=$(make_landed_secondmate "$home" sparse-b)
+  sparse_c=$(make_landed_secondmate "$home" sparse-c)
+  i=1
+  while [ "$i" -le 12 ]; do
+    append_landed_row "$dominant" "$(printf 'dominant-landed-%02d' "$i")" \
+      "$(printf 'Dominant landed %02d' "$i")" "$(printf '2026-07-%02d' "$((31 - i))")"
+    i=$((i + 1))
+  done
+  i=1
+  while [ "$i" -le 2 ]; do
+    append_landed_row "$sparse_a" "$(printf 'sparse-a-landed-%02d' "$i")" \
+      "$(printf 'Sparse A landed %02d' "$i")" "$(printf '2026-07-%02d' "$((12 - i))")"
+    append_landed_row "$sparse_b" "$(printf 'sparse-b-landed-%02d' "$i")" \
+      "$(printf 'Sparse B landed %02d' "$i")" "$(printf '2026-07-%02d' "$((10 - i))")"
+    append_landed_row "$sparse_c" "$(printf 'sparse-c-landed-%02d' "$i")" \
+      "$(printf 'Sparse C landed %02d' "$i")" "$(printf '2026-07-%02d' "$((8 - i))")"
+    i=$((i + 1))
+  done
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  actual=$(printf '%s' "$json" | jq -r '.landed[] | "\(.owner)/\(.id)"')
+  expected='dominant/dominant-landed-01
+sparse-a/sparse-a-landed-01
+sparse-b/sparse-b-landed-01
+sparse-c/sparse-c-landed-01
+dominant/dominant-landed-02
+sparse-a/sparse-a-landed-02'
+  [ "$actual" = "$expected" ] || fail "default landed selection was not balanced across homes: $actual"
+  printf '%s' "$json" | jq -e '
+    (.landed | length) == 6
+      and ([.landed[].owner] | unique | length) == 4
+      and ([.omitted[].surface] | any(test("landed showing 6 of 12")))
+  ' >/dev/null || fail "balanced landed default did not preserve cap disclosure: $json"
+  pass "default landed selection balances one dominant home with sparse homes"
+}
+
+test_landed_default_refills_capacity_after_sparse_homes_exhaust() {
+  local home dominant sparse fakebin json actual expected i
+  home=$(make_home landed-sparse-refill)
+  : > "$home/data/secondmates.md"
+  printf '## Done\n' > "$home/data/backlog.md"
+  dominant=$(make_landed_secondmate "$home" dominant)
+  sparse=$(make_landed_secondmate "$home" sparse)
+  i=1
+  while [ "$i" -le 5 ]; do
+    append_landed_row "$dominant" "$(printf 'dominant-landed-%02d' "$i")" \
+      "$(printf 'Dominant landed %02d' "$i")" "$(printf '2026-07-%02d' "$((20 - i))")"
+    i=$((i + 1))
+  done
+  append_landed_row "$sparse" sparse-landed-01 "Sparse landed 01" 2026-07-01
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  actual=$(printf '%s' "$json" | jq -r '.landed[] | "\(.owner)/\(.id)"')
+  expected='dominant/dominant-landed-01
+sparse/sparse-landed-01
+dominant/dominant-landed-02
+dominant/dominant-landed-03
+dominant/dominant-landed-04
+dominant/dominant-landed-05'
+  [ "$actual" = "$expected" ] || fail "sparse homes wasted landed capacity: $actual"
+  pass "landed selection refills capacity after sparse homes exhaust"
+}
+
+test_landed_default_uses_deterministic_home_order_when_homes_exceed_cap() {
+  local home mate fakebin json actual expected i id
+  home=$(make_home landed-home-order)
+  : > "$home/data/secondmates.md"
+  printf '## Done\n' > "$home/data/backlog.md"
+  i=1
+  while [ "$i" -le 8 ]; do
+    id=$(printf 'home-%02d' "$i")
+    mate=$(make_landed_secondmate "$home" "$id")
+    append_landed_row "$mate" "$id-landed-01" "$id landed 01" 2026-07-10
+    i=$((i + 1))
+  done
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  actual=$(printf '%s' "$json" | jq -r '.landed[] | "\(.owner)/\(.id)"')
+  expected='home-01/home-01-landed-01
+home-02/home-02-landed-01
+home-03/home-03-landed-01
+home-04/home-04-landed-01
+home-05/home-05-landed-01
+home-06/home-06-landed-01'
+  [ "$actual" = "$expected" ] || fail "landed home-order tie was not deterministic: $actual"
+  printf '%s' "$json" | jq -e '
+    ([.omitted[].surface] | any(test("landed showing 6 of 8")))
+  ' >/dev/null || fail "more-homes-than-cap omission was not disclosed: $json"
+  pass "landed selection uses deterministic home order when homes exceed the cap"
+}
+
+test_landed_default_preserves_internal_order_for_ties() {
+  local home tie_a tie_b fakebin json actual expected
+  home=$(make_home landed-ties)
+  : > "$home/data/secondmates.md"
+  printf '## Done\n' > "$home/data/backlog.md"
+  tie_a=$(make_landed_secondmate "$home" tie-a)
+  tie_b=$(make_landed_secondmate "$home" tie-b)
+  append_landed_row "$tie_b" tie-b-a "Tie B A" 2026-07-10
+  append_landed_row "$tie_b" tie-b-z "Tie B Z" 2026-07-10
+  append_landed_row "$tie_a" tie-a-a "Tie A A" 2026-07-10
+  append_landed_row "$tie_a" tie-a-z "Tie A Z" 2026-07-10
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  actual=$(printf '%s' "$json" | jq -r '.landed[] | "\(.owner)/\(.id)"')
+  expected='tie-a/tie-a-z
+tie-b/tie-b-z
+tie-a/tie-a-a
+tie-b/tie-b-a'
+  [ "$actual" = "$expected" ] || fail "landed tie ordering changed: $actual"
+  pass "landed selection preserves deterministic home and internal tie ordering"
+}
+
+test_landed_default_handles_no_landed_items() {
+  local home fakebin json
+  home=$(make_home landed-empty)
+  : > "$home/data/secondmates.md"
+  printf '## Done\n' > "$home/data/backlog.md"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.landed | length) == 0
+      and ([.omitted[].surface] | any(test("landed")) | not)
+  ' >/dev/null || fail "empty landed set was not handled cleanly: $json"
+  pass "landed selection handles no landed items"
+}
+
+test_all_landed_keeps_complete_global_order() {
+  local home alpha beta fakebin json actual expected
+  home=$(make_home landed-all-order)
+  : > "$home/data/secondmates.md"
+  printf '## Done\n' > "$home/data/backlog.md"
+  alpha=$(make_landed_secondmate "$home" alpha)
+  beta=$(make_landed_secondmate "$home" beta)
+  append_landed_row "$alpha" alpha-old "Alpha old" 2026-07-01
+  append_landed_row "$alpha" alpha-new "Alpha new" 2026-07-09
+  append_landed_row "$beta" beta-new "Beta new" 2026-07-10
+  append_landed_row "$beta" beta-mid "Beta mid" 2026-07-05
+  fakebin=$(make_fakebin "$home")
+  json=$(FM_BEARINGS_LANDED=1 run "$home" "$fakebin" --json --all-landed)
+  actual=$(printf '%s' "$json" | jq -r '.landed[] | "\(.owner)/\(.id)"')
+  expected='beta/beta-new
+alpha/alpha-new
+beta/beta-mid
+alpha/alpha-old'
+  [ "$actual" = "$expected" ] || fail "--all-landed global order changed: $actual"
+  printf '%s' "$json" | jq -e '
+    (.landed | length) == 4
+      and ([.omitted[].surface] | any(test("landed|snapshot layer")) | not)
+  ' >/dev/null || fail "--all-landed no longer revealed the complete landed set: $json"
+  pass "--all-landed keeps the complete global landed output"
+}
+
 # The roll-up stays bounded: a per-home cap and an overall cap, both disclosed in
 # omitted[], with --all-landed as the counted expansion knob. This also covers the
 # previously-silent main-home landed truncation.
@@ -1142,11 +1322,30 @@ $(printf 'mate-landed-%02d' "$i")"
   pass "landed stays bounded with per-home + overall caps and omitted[] disclosure"
 }
 
+# Bearings projects authoritative structured state rather than inventing return
+# policy. A live blocked child remains a live in-flight record with state=blocked
+# and an open blocker; it must never be converted into a queued `gates` record.
+# The return-catch-up owner prevents this state from reaching ordinary rendering
+# during an away return, while this test pins Bearings' own projection boundary.
+test_live_blocker_is_not_charted_queue_work() {
+  local home fakebin json
+  home=$(make_home live-blocker); write_fixture "$home"
+  printf 'blocked [key=synthetic-dependency]: firstmate can refresh the synthetic token\n' > "$home/state/ship-task.status"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.in_flight | any(.[]; .id == "ship-task" and .state == "blocked"))
+      and (.decisions_open | any(.[]; .id == "ship-task") | not)
+      and (.gates | any(.[]; .id == "ship-task") | not)
+  ' >/dev/null || fail "live blocked work was projected as queued/deferred work: $json"
+  pass "Bearings keeps a live blocker in structured live state and never converts it to Charted Next queue work"
+}
+
 # Captain's Call is populated only from the durable keyed open-decision set. The
 # anti-leak guard: action-free highlights - a working task, a completed scout,
 # queued/gated items, landed work - must never surface as an open decision, so they
 # cannot leak into Captain's Call. The standard fixture has exactly one genuine open
-# decision (the secondmate's masked needs-decision).
+# decision (the secondmate's structured captain hold).
 test_captains_call_anti_leak() {
   local home fakebin json canonical
   home=$(make_home anti-leak); write_fixture "$home"
@@ -1154,8 +1353,10 @@ test_captains_call_anti_leak() {
   json=$(run "$home" "$fakebin" --json)
   canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   jq -n -e --argjson bearings "$json" --argjson canonical "$canonical" '
-    (([$bearings.decisions_open[].id]
-      + [$canonical.tasks[] | select(.hints.pending_decision or .hints.blocked_event) | .id]) | unique) == ["mate"]
+    ([$bearings.decisions_open[].id] == ["mate/mate-decision-race"])
+      and ($canonical.secondmate_current.records[] | select(.id == "mate")
+        | (.decisions_open | any(.source == "status"))
+          and (.decisions_open | any(.source == "backlog")))
       and ([$bearings.decisions_open[].id] | index("ship-task") | not)
       and ([$bearings.decisions_open[].id] | index("scout-x") | not)
       and ([$bearings.decisions_open[].id] | index("external-wait") | not)
@@ -1211,7 +1412,14 @@ test_current_landed_baseline_is_repeatable_and_prior_report_independent
 test_default_is_bounded_and_local_only
 test_toon_json_parity
 test_landed_includes_secondmate_home_merges
+test_landed_default_balances_dominant_and_sparse_homes
+test_landed_default_refills_capacity_after_sparse_homes_exhaust
+test_landed_default_uses_deterministic_home_order_when_homes_exceed_cap
+test_landed_default_preserves_internal_order_for_ties
+test_landed_default_handles_no_landed_items
+test_all_landed_keeps_complete_global_order
 test_landed_bounded_and_disclosed
+test_live_blocker_is_not_charted_queue_work
 test_captains_call_anti_leak
 test_chat_contract_four_sections
 test_completed_scout_report_not_pending

@@ -273,13 +273,17 @@ test_bootstrap_activates_and_opts_out() {
   FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" >/dev/null 2>&1
   sum2=$(shasum < "$home/state/clickstack-watch.check.sh")
   [ "$sum1" = "$sum2" ] || fail "bootstrap receiver setup must be idempotent"
+  # Exactly the shim plus its registered watcher check-trust binding (bin/fm-check-register.sh);
+  # no other clickstack-watch* artifact should appear.
   n=$(find "$home/state" -maxdepth 1 -name 'clickstack-watch*' | wc -l | tr -d ' ')
-  [ "$n" = "1" ] || fail "bootstrap must not duplicate the poll shim (found $n)"
+  [ "$n" = "2" ] || fail "bootstrap must not duplicate the poll shim (found $n)"
+  assert_present "$home/state/clickstack-watch.check-trust" "bootstrap must register the poll shim as a trusted watcher check"
   # Opt out: remove the gate -> next bootstrap removes the shim and says off.
   rm -f "$home/config/clickstack-webhook.env"
   out=$(FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
   assert_contains "$out" "CLICKSTACK: webhook receiver off" "opt-out must report cleanup"
   assert_absent "$home/state/clickstack-watch.check.sh" "opt-out must remove the poll shim"
+  assert_absent "$home/state/clickstack-watch.check-trust" "opt-out must remove the check-trust binding"
   pass "bootstrap activates from the gate idempotently and cleans up on opt-out"
 }
 
