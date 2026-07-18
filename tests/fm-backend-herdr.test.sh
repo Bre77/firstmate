@@ -1219,6 +1219,22 @@ test_capture_ansi_and_plain_pass_through_an_explicit_source() {
   pass "fm_backend_herdr_capture: an explicit [source] argument overrides the default 'recent'"
 }
 
+test_capture_normalizes_an_unrecognized_source_to_recent() {
+  local dir log resp fb out
+  # fm-crew-state.sh's pane_readable (and other callers) pass an
+  # expected-label into this positional slot; herdr's CLI hard-errors on any
+  # unrecognized --source value, so a stray label must not reach it verbatim.
+  dir="$TMP_ROOT/capture-unrecognized-source"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf 'a\nb\nc\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_capture default:w1:p2 250 fm-web-widget-tools-more-h3' "$ROOT" )
+  [ "$out" = $'a\nb\nc' ] || fail "capture with a stray label as the source arg should still succeed, got '$out'"
+  assert_contains "$(cat "$log")" "HERDR_SESSION=default"$'\x1f''pane'$'\x1f''read'$'\x1f''w1:p2'$'\x1f''--source'$'\x1f''recent'$'\x1f''--lines'$'\x1f''250' \
+    "an unrecognized [source] value must normalize to 'recent', not reach the herdr CLI verbatim"
+  pass "fm_backend_herdr_capture: an unrecognized [source] value (e.g. a caller's expected-label) normalizes to 'recent'"
+}
+
 # --- wait_for_working: the native agent-state poll-and-classify primitive ---
 # Direct unit coverage for fm_backend_herdr_wait_for_working, the helper
 # fm_backend_herdr_send_text_submit now uses instead of composer scraping
@@ -2180,6 +2196,7 @@ test_capture_calls_pane_read
 test_capture_works_around_small_lines_bug
 test_capture_preserves_pane_read_failure
 test_capture_ansi_and_plain_pass_through_an_explicit_source
+test_capture_normalizes_an_unrecognized_source_to_recent
 test_send_key_normalizes_and_targets_pane
 test_kill_is_best_effort
 test_current_path_reads_cwd

@@ -644,9 +644,21 @@ fm_backend_herdr_send_key() {  # <target> <key>
 # (see its own call site) so a narrow pane's word-wrap cannot inflate physical
 # row counts and push the live composer row out of the tail window; every
 # other caller keeps the default `recent` (human-legible, wrapped) shape.
+#
+# fm_backend_herdr_normalize_source: some callers positionally pass an
+# expected-label (not a source) into this slot, and herdr's CLI hard-errors
+# on any unrecognized --source value - silently turning an alive pane into a
+# reported failure. Unrecognized input falls back to `recent` instead.
+fm_backend_herdr_normalize_source() {  # <source>
+  case "$1" in
+    recent|recent-unwrapped|visible) printf '%s' "$1" ;;
+    *) printf 'recent' ;;
+  esac
+}
 fm_backend_herdr_capture() {  # <target> <lines> [source]
   fm_backend_herdr_target_ready "$1" || return 1
-  local lines=${2:-200} source=${3:-recent} fetch out
+  local lines=${2:-200} source fetch out
+  source=$(fm_backend_herdr_normalize_source "${3:-recent}")
   case "$lines" in ''|*[!0-9]*) lines=200 ;; esac
   fetch=$lines
   case "$fetch" in ''|*[!0-9]*) fetch=200 ;; *) [ "$fetch" -ge 200 ] || fetch=200 ;; esac
@@ -656,7 +668,8 @@ fm_backend_herdr_capture() {  # <target> <lines> [source]
 
 fm_backend_herdr_capture_ansi() {  # <target> <lines> [source]
   fm_backend_herdr_target_ready "$1" || return 1
-  local lines=${2:-200} source=${3:-recent} fetch out
+  local lines=${2:-200} source fetch out
+  source=$(fm_backend_herdr_normalize_source "${3:-recent}")
   case "$lines" in ''|*[!0-9]*) lines=200 ;; esac
   fetch=$lines
   case "$fetch" in ''|*[!0-9]*) fetch=200 ;; *) [ "$fetch" -ge 200 ] || fetch=200 ;; esac
