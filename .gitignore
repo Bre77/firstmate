@@ -18,3 +18,4 @@ config/cmux-socket-password
 config/clickstack-webhook.env
 config/betterstack-webhook.env
 config/wedge-alarm
+config/max-crew

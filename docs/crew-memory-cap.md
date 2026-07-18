@@ -150,3 +150,18 @@ Jul 08 12:14:38 hq systemd[844]: firstmate.slice: A process of this unit has bee
 
 Both `systemd-run --user --scope` mechanics and the actual `bin/fm-spawn.sh` wrapping were verified live on this host, end to end, including the failure path (OOM-kill contained to one crew's cgroup) and the fallback path (unavailable systemd-run still lets the spawn proceed, unwrapped, with a warning - covered by `tests/fm-crew-memory-cap.test.sh` using a stubbed `systemd-run`).
 The feature is safe to ship as implemented, with no further host or ansible configuration required.
+
+## Concurrent crew admission cap (config/max-crew / FM_MAX_CREW)
+
+This cap closes the aggregate gap called out above: the per-crew cap bounds one runaway crew's own cgroup, but nothing bounded how many crews could be live at once on a fixed-RAM host.
+A 2026-07-17 investigation into several crews going silent within the same second found a burst of 9 concurrent launches on a 30GB host in the 70 minutes before the event, several `opus`/`high-effort`, against per-crew caps of 8-20GB each - a condition this gap explicitly allowed.
+The investigation ruled out a per-crew `MemoryMax` kill and a mid-session CLI update as the mechanism, but could not prove the concurrency burst caused the synchronized failure either; the captain's ruling was to adopt this cap regardless as prudent resource hygiene, not as a proven fix for that incident.
+
+`bin/fm-spawn.sh` refuses a NEW ship/scout AGENT launch once this home already has cap-or-more live ship/scout tasks.
+"Live" is a count of `state/*.meta` files recording `kind=ship` or `kind=scout`, which `fm-teardown.sh` removes on landing - so the count reflects tasks still recorded as under way, not a deeper backend liveness probe.
+The task's own id is excluded from its own count, so relaunching an already-tracked task (`stuck-crewmate-recovery`) is never blocked by its own prior record.
+`--secondmate` AGENT launches are exempt: they are persistent supervisors, not burst dispatch load.
+
+Default cap is 6, chosen as a middle ground on this host's 30GB RAM / 9GB swap: comfortably below the 9-launch burst the investigation observed, while still allowing real parallelism given `MemoryHigh` is a soft throttle that most crews never fully consume.
+Override with local, gitignored `config/max-crew` (one line, an integer) or the `FM_MAX_CREW` env var, which wins over the file.
+A refusal names the live count, the cap, and both override knobs, so an operator queues the task or raises the cap rather than silently losing the dispatch - see `tests/fm-crew-admission-cap.test.sh` for the exact refusal and admission behavior.

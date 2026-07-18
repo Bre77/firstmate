@@ -101,6 +101,13 @@ An absent file means `auto`, i.e. default-on on macOS: the alarm exists precisel
 A missing or failing channel logs and falls through to the next, never crashing the daemon.
 See [`wedge-alarm.md`](wedge-alarm.md) for the channel reference and macOS verification evidence, and [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
 
+## Concurrent crew admission cap (config/max-crew / FM_MAX_CREW)
+
+`bin/fm-spawn.sh` refuses a NEW ship/scout AGENT launch once this home already has cap-or-more live ship/scout tasks, counted from `state/*.meta` files recording `kind=ship` or `kind=scout` (excluding the task's own id, so relaunching an already-tracked task is never blocked by its own prior record).
+`--secondmate` AGENT launches are exempt.
+Default cap is 6; override with local, gitignored `config/max-crew` (one line, an integer) or the `FM_MAX_CREW` env var, which wins over the file.
+See [`docs/crew-memory-cap.md`](crew-memory-cap.md#concurrent-crew-admission-cap-configmax-crew--fm_max_crew) for the full rationale and the refusal message contract.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and defines `commands.test` so no-mistakes runs firstmate's bash behavior suite directly.
@@ -371,6 +378,7 @@ FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in C
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes runs rows scanned when cross-branch attribution falls back from axi status
 FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state reader used by working/paused watcher triage
+FM_MAX_CREW=            # override config/max-crew (default 6): concurrent live ship/scout task cap in fm-spawn.sh's admission check (docs/crew-memory-cap.md)
 FMX_PAIRING_TOKEN=      # X mode pairing token; .env opt-in authorizes replies and eligible lifecycle actions
 FMX_RELAY_URL=https://myfirstmate.io   # optional X relay override, mainly for local relay development
 FMX_ENV_FILE=           # optional alternate .env file for direct X client invocations; bootstrap still checks $FM_HOME/.env

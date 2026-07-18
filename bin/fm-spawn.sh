@@ -74,6 +74,14 @@
 #   (the persistent supervisor process itself) is not wrapped, though every
 #   crewmate IT spawns goes through this same fm-spawn.sh path and is capped
 #   identically. See docs/crew-memory-cap.md for the empirical verification.
+#   Concurrent crew admission cap: before a NEW ship/scout AGENT launches, refuses
+#   the spawn if this home already has cap-or-more live ship/scout tasks (counted
+#   from state/*.meta kind=ship|scout, excluding this task's own id so a relaunch
+#   of an already-tracked task is never blocked by its own prior record). Default
+#   cap is 6; override with local gitignored config/max-crew (one line, an
+#   integer) or the FM_MAX_CREW env var (env wins). A --secondmate AGENT launch is
+#   exempt. Resource hygiene, not a proven fix for any specific incident - see
+#   docs/crew-memory-cap.md.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -143,6 +151,69 @@ fm_refuse_if_gate_agent
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
+
+# Concurrent crew admission cap (docs/crew-memory-cap.md "Concurrent crew
+# admission cap"): a count-based limit on already-live ship/scout tasks in
+# THIS home, checked once per single-task spawn before a NEW ship/scout AGENT
+# launches. This is resource hygiene, not a proven fix for any specific
+# incident - it exists because the per-crew memory cap above bounds one
+# runaway crew's own cgroup but was never designed to bound how many crews
+# can be live at once. Secondmate AGENT launches are exempt: they are
+# persistent supervisors, not burst dispatch load.
+FM_MAX_CREW_DEFAULT=6
+
+# fm_max_crew_cap: resolve the effective cap. FM_MAX_CREW env wins, then the
+# first non-empty line of local gitignored config/max-crew, then the default.
+# A non-numeric or empty resolved value falls back to the default rather than
+# refusing every spawn on a typo.
+fm_max_crew_cap() {
+  local raw=
+  if [ -n "${FM_MAX_CREW:-}" ]; then
+    raw=$FM_MAX_CREW
+  elif [ -f "$CONFIG/max-crew" ]; then
+    raw=$(tr -d '[:space:]' < "$CONFIG/max-crew" 2>/dev/null || true)
+  fi
+  case "$raw" in
+    ''|*[!0-9]*) printf '%s\n' "$FM_MAX_CREW_DEFAULT" ;;
+    *) printf '%s\n' "$raw" ;;
+  esac
+}
+
+# fm_live_crew_count <exclude-id>: count state/<id>.meta files recording
+# kind=ship or kind=scout, excluding <exclude-id> (a relaunch of an already-
+# tracked task reuses its own id and must not be blocked by its own prior
+# record - see stuck-crewmate-recovery). A meta file with no readable kind=
+# line is not counted rather than guessed.
+fm_live_crew_count() {
+  local exclude_id=$1 count=0 meta base kind
+  [ -d "$STATE" ] || { printf '0\n'; return 0; }
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    base=$(basename "$meta" .meta)
+    [ "$base" != "$exclude_id" ] || continue
+    kind=$(grep -m1 '^kind=' "$meta" 2>/dev/null | cut -d= -f2-)
+    case "$kind" in
+      ship|scout) count=$((count + 1)) ;;
+    esac
+  done
+  printf '%s\n' "$count"
+}
+
+# fm_crew_admission_check <id>: refuse a ship/scout spawn once the live count
+# meets or exceeds the cap. Loud and actionable by design (AGENTS.md "Refusal
+# is loud and actionable"): names the live count, the cap, and both override
+# knobs, so an operator queues the task instead of silently losing it.
+fm_crew_admission_check() {
+  local id=$1 cap live
+  cap=$(fm_max_crew_cap)
+  live=$(fm_live_crew_count "$id")
+  if [ "$live" -ge "$cap" ]; then
+    echo "error: crew admission cap reached: $live ship/scout task(s) already live in this home (cap $cap). Queue this task, tear down finished work, or raise the cap via config/max-crew or FM_MAX_CREW (docs/crew-memory-cap.md)." >&2
+    return 1
+  fi
+  return 0
+}
+
 KIND=ship
 HARNESS_ARG=
 MODEL=
@@ -310,6 +381,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
 fi
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
+[ "$KIND" = secondmate ] || fm_crew_admission_check "$ID" || exit 1
 PROJ=
 ARG3=
 FIRSTMATE_HOME=
