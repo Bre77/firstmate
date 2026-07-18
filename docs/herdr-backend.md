@@ -349,6 +349,33 @@ Before the workaround, an early version of the real-herdr smoke test flaked inte
 It always requests a generous floor (>= 200 lines, comfortably above any realistic pane viewport) from herdr, then trims to the caller's actual requested bound locally with `tail -n N`.
 Verified this eliminates the flake across repeated full smoke-test runs.
 
+## Verified bug: an unrecognized `--source` value hard-errors, not a graceful fallback
+
+Verified 2026-07-18, herdr 0.7.3, protocol 16, Linux (`hq`).
+
+`herdr pane read <pane> --source <value>` rejects any value outside its own enum (`visible`, `recent`, `recent-unwrapped`) with a nonzero exit and an error body, rather than falling back to a default:
+
+```
+$ herdr --session fm-crewstate-repro-q5 pane read w1:p1 --source recent --lines 200
+brett@hq:~/.treehouse/firstmate-fork-87afa0/3/firstma
+te-fork$
+$ echo $?
+0
+$ herdr --session fm-crewstate-repro-q5 pane read w1:p1 --source fm-web-widget-tools-more-h3 --lines 200
+Error: Custom { kind: Other, error: "invalid read source: fm-web-widget-tools-more-h3" }
+$ echo $?
+1
+```
+
+This mattered because `fm_backend_herdr_capture`'s third positional argument is `[source]`, but the shared `fm_backend_capture` dispatcher's cross-backend contract (`bin/fm-backend.sh`) is `<backend> <target> <lines> [expected-label]` - the shape zellij's and cmux's own capture functions genuinely implement.
+Several callers written against that shared contract (`bin/fm-crew-state.sh`'s `pane_readable`, `bin/fm-watch.sh`'s heartbeat sweep, `bin/fm-peek.sh`, `bin/fm-fleet-snapshot.sh`) pass a task's `fm-<id>` expected-label positionally into what herdr treats as `source`.
+The resulting CLI error made `fm_backend_herdr_capture` return failure for a target that was actually reachable, and `bin/fm-crew-state.sh`'s no-run fallback reported it as `state: unknown - backend target gone: <target>` for a pane independently confirmed alive via `fm-peek`.
+A raw `session:pane` selector never carries an expected-label, so `fm-peek` invoked that way sidesteps the bug and reads correctly - which is why the two tools visibly disagreed on the same pane.
+Since `bin/fm-crew-state.sh`'s `EXPECTED_LABEL` is unconditionally non-empty for any resolved task, every herdr crew reaching that fallback path hit this deterministically, not intermittently.
+
+**Fix:** `fm_backend_herdr_normalize_source` validates the `[source]` argument against herdr's real enum before it reaches the CLI, falling back to `recent` for anything else (including a stray expected-label).
+`tests/fm-backend-herdr.test.sh`'s `test_capture_normalizes_an_unrecognized_source_to_recent` covers it.
+
 ## Verified gap: `agent.get` reads idle during a long foreground tool call
 
 `herdr agent get <pane>` -> `.result.agent.agent_status` was verified against a short interactive `claude` exchange (see "Busy state" above): `working` while the model streams a turn, `done` once it stops.
