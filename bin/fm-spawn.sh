@@ -904,11 +904,20 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # Compare against PROJ_ABS_REAL (physical), not PROJ_ABS: a symlinked project
   # prefix would otherwise make the pane's OS-level cwd read differ from
   # PROJ_ABS on the very first poll, before the pane has actually moved.
+  # Accept a sample only once it proves out as an actual worktree root, not just
+  # any path that differs from the project: herdr can report an intermediate cwd
+  # (e.g. the treehouse pool root) while the subshell is still resolving.
   for _ in $(seq 1 60); do
     p=$(spawn_current_path "$WT_TARGET" || true)
-    if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" != "$PROJ_ABS_REAL" ]; then
-      WT="$p"
-      break
+    if [ -n "$p" ]; then
+      p_real=$(real_path_or_raw "$p")
+      if [ "$p_real" != "$PROJ_ABS_REAL" ]; then
+        p_top=$(git -C "$p" rev-parse --show-toplevel 2>/dev/null || true)
+        if [ -n "$p_top" ] && [ "$(real_path_or_raw "$p_top")" = "$p_real" ]; then
+          WT="$p"
+          break
+        fi
+      fi
     fi
     sleep 1
   done

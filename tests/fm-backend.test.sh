@@ -882,6 +882,105 @@ test_spawn_symlinked_project_prefix_avoids_false_refusal() {
   pass "fm-spawn.sh: a project reached through a symlinked prefix (e.g. macOS /tmp -> /private/tmp) does not trip the isolation guard's false refusal"
 }
 
+# --- worktree-detection race: an intermediate non-worktree cwd sample must not
+# be mistaken for the real worktree (2026-07-22 herdr pool-root false refusal) ---
+#
+# A backend's pane cwd can differ from the project before the subshell has
+# actually landed in the worktree - e.g. herdr reports the treehouse pool root
+# mid-resolution. The old code accepted the FIRST sample that merely differed
+# from the project path, so that intermediate reading was mistaken for the
+# worktree and validate_spawn_worktree then refused with "worktree root
+# 'none'" even though the pane reached a real worktree moments later.
+# make_spawn_race_fakebin's tmux stub returns a plain non-worktree directory
+# for the first <bad_count> polls, then the real worktree forever after (or
+# forever, when <good> is empty) - exercising the same detection loop these
+# fakes drive in test_spawn_symlinked_project_prefix_avoids_false_refusal.
+make_spawn_race_fakebin() {  # <dir> <bad-path> <good-path-or-empty> <bad-count> -> echoes fakebin dir
+  local dir=$1 bad=$2 good=$3 bad_count=$4 fb="$1/fakebin" counter="$1/poll-count"
+  mkdir -p "$fb"
+  : > "$counter"
+  cat > "$fb/tmux" <<SH
+#!/usr/bin/env bash
+set -u
+{ printf 'tmux'; for a in "\$@"; do printf '\\x1f%s' "\$a"; done; printf '\\n'; } >> "\${FM_TMUX_LOG:?}"
+case "\${1:-}" in
+  display-message)
+    for a in "\$@"; do case "\$a" in *pane_current_path*)
+      printf x >> "$counter"
+      if [ "\$(wc -c < "$counter")" -le "$bad_count" ] || [ -z "$good" ]; then
+        printf '%s\\n' "$bad"
+      else
+        printf '%s\\n' "$good"
+      fi
+      exit 0
+    ;; esac; done
+    printf 'firstmate\\n'; exit 0 ;;
+  list-windows) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/tmux"
+  fm_fake_exit0 "$fb" treehouse
+  # The detection loop sleeps 1s between polls (up to 60 times); stub sleep as
+  # a no-op so an all-bad-samples run exercises every real iteration of the
+  # loop's logic without the test itself taking a minute.
+  cat > "$fb/sleep" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fb/sleep"
+  printf '%s\n' "$fb"
+}
+
+test_spawn_intermediate_nonworktree_sample_is_skipped() {
+  local proj wt pool_root id fb data state config log out rc
+  proj="$TMP_ROOT/race-proj"; wt="$TMP_ROOT/race-wt"
+  id="spawnrace1"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  # A plain directory that is not a git worktree at all - stands in for the
+  # herdr pool root sampled mid-resolution.
+  pool_root="$TMP_ROOT/race-pool-root"; mkdir -p "$pool_root"
+  fb=$(make_spawn_race_fakebin "$TMP_ROOT/race-fake-1" "$pool_root" "$wt" 1)
+  data="$TMP_ROOT/race-data-1"; mkdir -p "$data/$id"
+  printf 'test brief content\n' > "$data/$id/brief.md"
+  state="$TMP_ROOT/race-state-1"; config="$TMP_ROOT/race-config-1"
+  mkdir -p "$state" "$config"
+  log="$TMP_ROOT/race-spawn-1.log"
+
+  out=$(run_spawn_case "$ROOT" "$fb" "$log" "$state" "$data" "$config" "$proj" -- "$id" "$proj" claude 2>&1)
+  rc=$?
+  expect_code 0 "$rc" "fm-spawn.sh should succeed once a later poll reaches the real worktree, even after an earlier poll sampled a non-worktree intermediate path"$'\n'"$out"
+  assert_contains "$out" "worktree=$wt" \
+    "fm-spawn.sh did not resolve to the real worktree after skipping the non-worktree intermediate sample"
+
+  rm -rf "/tmp/fm-$id"
+  pass "fm-spawn.sh: worktree detection skips an intermediate non-worktree cwd sample and accepts the real worktree once it appears"
+}
+
+test_spawn_all_nonworktree_samples_fails_with_existing_error() {
+  local proj wt pool_root id fb data state config log out rc
+  proj="$TMP_ROOT/race-proj-2"; wt="$TMP_ROOT/race-wt-2"
+  id="spawnrace2"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  pool_root="$TMP_ROOT/race-pool-root-2"; mkdir -p "$pool_root"
+  # <good> empty -> every poll returns the non-worktree path, for all 60 tries.
+  fb=$(make_spawn_race_fakebin "$TMP_ROOT/race-fake-2" "$pool_root" "" 999)
+  data="$TMP_ROOT/race-data-2"; mkdir -p "$data/$id"
+  printf 'test brief content\n' > "$data/$id/brief.md"
+  state="$TMP_ROOT/race-state-2"; config="$TMP_ROOT/race-config-2"
+  mkdir -p "$state" "$config"
+  log="$TMP_ROOT/race-spawn-2.log"
+
+  out=$(run_spawn_case "$ROOT" "$fb" "$log" "$state" "$data" "$config" "$proj" -- "$id" "$proj" claude 2>&1)
+  rc=$?
+  expect_code 1 "$rc" "fm-spawn.sh should still fail when every poll only ever samples a non-worktree path"$'\n'"$out"
+  assert_contains "$out" "did not enter a worktree within 60s" \
+    "fm-spawn.sh dropped the existing 60s timeout error message"
+
+  rm -rf "/tmp/fm-$id"
+  pass "fm-spawn.sh: worktree detection still fails with the existing 60s timeout error when no sample ever proves out as a real worktree"
+}
+
 # --- old vs new: fm-teardown.sh ----------------------------------------------
 
 make_teardown_fakebin() {  # <dir> -> echoes fakebin dir; logs tmux+treehouse calls
@@ -1095,6 +1194,8 @@ test_backend_of_selector_matches_explicit_target_meta
 test_send_conformance_old_vs_new
 test_peek_conformance_old_vs_new
 test_spawn_symlinked_project_prefix_avoids_false_refusal
+test_spawn_intermediate_nonworktree_sample_is_skipped
+test_spawn_all_nonworktree_samples_fails_with_existing_error
 test_teardown_conformance_old_vs_new
 test_spawn_refuses_unknown_backend_flag
 test_spawn_refuses_codex_app_backend_flag
