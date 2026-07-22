@@ -198,6 +198,15 @@ fm_composer_idle_matches() {
 fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [plain_content]
   local bordered=$1 content=$2 idle_re=${3:-} idle_case=${4:-sensitive} plain_content
   plain_content=${5:-$content}
+  # Bash's [:space:] trim below does not match NON-BREAKING SPACE (U+00A0),
+  # so normalize it to a plain space first or it survives every trim as
+  # leftover "real" content.
+  content=${content//$'\xc2\xa0'/ }
+  plain_content=${plain_content//$'\xc2\xa0'/ }
+  # plain_content is matched EXACTLY against a bare glyph just below; trim it
+  # too, or the normalized space above breaks that match.
+  plain_content="${plain_content#"${plain_content%%[![:space:]]*}"}"
+  plain_content="${plain_content%"${plain_content##*[![:space:]]}"}"
   if [ "$bordered" != 1 ] && [ -z "$content" ] && [ -n "$plain_content" ]; then
     case "$plain_content" in
       '❯'|'›') printf 'empty'; return 0 ;;

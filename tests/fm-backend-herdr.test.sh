@@ -1073,6 +1073,43 @@ test_composer_state_claude_sgr90_gray_prompt_suggestion_ghost_is_empty() {
   pass "fm_backend_herdr_composer_state: claude's SGR-90 gray prompt-suggestion ghost (the 2026-07-11/12 wedge shape) reads empty"
 }
 
+# The 2026-07-16 through 07-21 recurrences (docs/herdr-backend.md): the daemon
+# log showed the identical "supervisor composer not confirmed-empty
+# (state=pending...)" defer for hours on an IDLE primary claude pane - no
+# ghost/de-emphasis styling involved at all this time. Live read-only capture
+# of a genuinely empty claude composer (`herdr pane read --source
+# recent-unwrapped --format ansi`, the exact read this classifier uses) showed
+# the composer's own row is "\xe2\x9d\xaf\xc2\xa0" - the bare "❯" prompt glyph
+# followed by a NON-BREAKING SPACE (U+00A0), not a plain ASCII space, and
+# carrying NO ANSI styling at all (so the ghost stripper never enters into
+# it). fm_composer_classify_content's whitespace trim and its "❯ "-prefix
+# strip both operate on bash's [:space:] class, which does not include U+00A0,
+# so the trailing NBSP survived every trim and read as leftover real content -
+# pending, forever, on a pane that was genuinely idle.
+test_composer_state_claude_nbsp_padded_empty_composer_is_empty() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-claude-nbsp-empty"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n\xe2\x9d\xaf\xc2\xa0\n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n  Fable 5                 80%%\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p3' "$ROOT" )
+  [ "$out" = empty ] || fail "claude's NBSP-padded empty composer (bare '❯' + U+00A0, no styling) must read empty, got '$out' (regression: the 2026-07-16..07-21 away-mode injection wedges)"
+  pass "fm_backend_herdr_composer_state: claude's NBSP-padded empty composer (the 2026-07-16..07-21 wedge shape) reads empty"
+}
+
+# Same row shape, but with real typed text after the glyph+NBSP - must still
+# read pending, so the NBSP normalization never weakens real-input protection.
+test_composer_state_claude_nbsp_then_real_text_is_pending() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-claude-nbsp-real"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n\xe2\x9d\xaf\xc2\xa0land pr 416 now\n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n  Fable 5                 80%%\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p3' "$ROOT" )
+  [ "$out" = pending ] || fail "real typed text after the glyph+NBSP padding must still read pending, got '$out'"
+  pass "fm_backend_herdr_composer_state: real typed text following the glyph+NBSP padding still reads pending"
+}
+
 # grok's TRUECOLOR placeholder gap (harness-adapters "Known gap"), now covered by
 # the same owner. grok renders its composer inside a bordered box whose border
 # and placeholder/hint text use a dark, muted truecolor foreground (verified live
@@ -2219,6 +2256,8 @@ test_composer_state_bare_prompt_below_stale_bordered_banner_wins
 test_composer_state_claude_dim_prompt_suggestion_ghost_is_empty
 test_composer_state_claude_dim_ghost_row_with_real_text_is_pending
 test_composer_state_claude_sgr90_gray_prompt_suggestion_ghost_is_empty
+test_composer_state_claude_nbsp_padded_empty_composer_is_empty
+test_composer_state_claude_nbsp_then_real_text_is_pending
 test_composer_state_grok_dark_truecolor_placeholder_is_empty
 test_composer_state_grok_bright_truecolor_real_text_is_pending
 test_composer_state_codex_bare_prompt_glyph_is_empty
