@@ -170,6 +170,14 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" treehouse
+  # A non-worktree FM_FAKE_PANE_PATH never proves out (see fm-spawn.sh's
+  # worktree-detection loop), so it polls the real 60-try deadline; stub sleep
+  # as a no-op so that case doesn't cost 60 real seconds here.
+  cat > "$fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/sleep"
   printf '%s\n' "$fakebin"
 }
 
@@ -196,21 +204,27 @@ test_spawn_isolation_abort() {
   mkdir -p "$TMP_ROOT/spawn-notgit" "$proj/sub"
 
   # Abort: the pane resolves to a plain non-git directory (not a worktree at all).
+  # A sample only gets accepted once it proves out as a real worktree root (git
+  # rev-parse --show-toplevel resolves back to it), so a pane that never leaves
+  # a non-worktree path polls the full deadline and hits the timeout error, not
+  # the (now unreachable via this path) validate_spawn_worktree message.
   out=$(run_spawn "$home" abort-notgit-dd4 "$proj" "$TMP_ROOT/spawn-notgit" "$fakebin"); status=$?
   expect_code 1 "$status" "spawn into a non-worktree dir should abort"
-  assert_contains "$out" "did not yield an isolated worktree" "non-worktree spawn lacked the isolation error"
+  assert_contains "$out" "did not enter a worktree within 60s" "non-worktree spawn lacked the timeout error"
   assert_absent "$home/state/abort-notgit-dd4.meta" "aborted spawn must not record meta"
 
   # Abort: the pane resolves INTO the primary checkout (a subdir of PROJ_ABS).
+  # Same reasoning: git rev-parse --show-toplevel on a project subdir resolves
+  # to the project root, not the subdir itself, so it never proves out either.
   out=$(run_spawn "$home" abort-primary-ee5 "$proj" "$proj/sub" "$fakebin"); status=$?
   expect_code 1 "$status" "spawn landing inside the primary checkout should abort"
-  assert_contains "$out" "did not yield an isolated worktree" "primary-checkout spawn lacked the isolation error"
+  assert_contains "$out" "did not enter a worktree within 60s" "primary-checkout spawn lacked the timeout error"
 
   # Proceed: the pane resolves to a genuine, isolated worktree.
   out=$(run_spawn "$home" ok-isolated-ff6 "$proj" "$TMP_ROOT/spawn-wt" "$fakebin"); status=$?
   expect_code 0 "$status" "spawn into a genuine isolated worktree should succeed"
   assert_contains "$out" "spawned ok-isolated-ff6" "isolated spawn did not report success"
-  assert_not_contains "$out" "did not yield an isolated worktree" "isolated spawn wrongly tripped the guard"
+  assert_not_contains "$out" "did not enter a worktree within 60s" "isolated spawn wrongly tripped the timeout"
   pass "fm-spawn: aborts unless the resolved worktree is a genuine, isolated worktree"
 }
 
