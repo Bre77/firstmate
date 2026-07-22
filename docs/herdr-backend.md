@@ -943,6 +943,35 @@ Neither incident's raw pane bytes were captured, so the fixes below are reasoned
 
 Regression coverage: `tests/fm-composer-lib.test.sh`'s `test_queued_hint_is_empty_standalone_and_inline`; `tests/fm-backend-herdr.test.sh`'s `composer_state_claude_queued_hint_*` (hint below an empty prompt row, hint as the standalone bottom-most row, and a real pending row below a stale hint still winning) and `composer_state_requests_recent_unwrapped_capture` / `capture_ansi_and_plain_pass_through_an_explicit_source`.
 
+## Incident (2026-07-16 through 07-21): away-mode injection wedged by an NBSP-padded empty composer, not ghost text
+
+Three away-mode injection wedges recurred after the SGR-90 fix above landed (2026-07-13): ~9h on 2026-07-20 (33247s undelivered), ~2h on 2026-07-21 (7262s undelivered), and 45 buffered escalations plus a `state/.subsuper-inject-wedged` marker on 2026-07-16/17.
+Unlike every prior wedge in this doc, the primary claude-on-herdr pane was confirmed genuinely idle throughout (`pane_is_busy` false), so this was not the "keep turns short, injection defers mid-turn" shape.
+
+**Root cause, reproduced live.** An isolated Herdr lab session (`bin/fm-herdr-lab.sh`, never the live `default` session) ran a freshly launched `claude --dangerously-skip-permissions` pane, idle, no message sent.
+`herdr --version`: 0.7.4.
+`claude --version`: 2.1.217 (model "Fable 5").
+The exact bytes `fm_backend_herdr_composer_state` itself reads (`herdr pane read <pane> --source recent-unwrapped --lines 20 --format ansi`), captured read-only from the lab pane and inspected with `hexdump -C`, showed the composer row is the bare `❯` prompt glyph followed by a NON-BREAKING SPACE (U+00A0, raw bytes `e2 9d af c2 a0`), carrying no ANSI styling at all.
+`fm_composer_classify_content` (`bin/fm-composer-lib.sh`) trims and strips the leading glyph using bash's `[:space:]` class, which does not match U+00A0, so the trailing NBSP survived every trim/strip step and the row read `pending` forever.
+Confirmed directly against the live lab pane: `fm_backend_herdr_composer_state "$TARGET"` returned `pending` before the fix and `empty` after, with `fm_backend_busy_state herdr "$TARGET"` reporting `idle` throughout both runs.
+`housekeeping`'s batch-flush and max-defer retries (`FM_ESCALATE_BATCH_SECS`, default 90s; `FM_MAX_DEFER_SECS`, default 300s) were already re-probing on a bounded cadence the whole time - the wedge was a deterministic misclassification of the identical row on every retry, not an abandoned or broken retry loop.
+
+**Fix.** `fm_composer_classify_content` normalizes a literal U+00A0 to a plain space before its trim and glyph-strip logic runs, so an NBSP-padded empty composer reads `empty` exactly like a space-padded one.
+This is the single shared owner every adapter delegates to (tmux, herdr, orca, cmux), so no per-adapter change was needed.
+Real typed text, including text carrying an incidental interior NBSP, still reads `pending`.
+
+**Adjacent claim checked, not reproduced.** This investigation's brief also named a claim that `escalate_flush` fails to clear `state/.subsuper-escalations` on a successful delivery, causing an identical digest to re-inject.
+Reading the current `escalate_flush` (`bin/fm-supervise-daemon.sh`) shows it truncates the buffer and removes `.since`/`.subsuper-inject-wedged` unconditionally on every successful `inject_msg`, and every call site (`housekeeping`'s batch flush and max-defer escape, and the daemon's shutdown `cleanup`) goes through this one function.
+No other code path writes the buffer outside `escalate_add`'s own create-if-absent `.since` handling.
+Left unchanged: no reproduction found in the current code.
+
+**Regression coverage.** `tests/fm-composer-lib.test.sh`'s `test_nbsp_padded_glyph_is_empty` and `test_nbsp_padding_does_not_mask_real_text` pin the shared owner directly, byte-exact.
+`tests/fm-backend-herdr.test.sh`'s `test_composer_state_claude_nbsp_padded_empty_composer_is_empty` and `test_composer_state_claude_nbsp_then_real_text_is_pending` reproduce the real captured row shape through the herdr adapter.
+`shellcheck bin/*.sh bin/backends/*.sh tests/*.sh` passes clean.
+
+**Also noted, not fixed (out of scope for this fix).** While tracing the classifier, a bare (unbordered) dead-shell prompt glyph followed by a plain trailing space - `"$ "`, not just the exact single-character `"$"` - already misread as `empty` before this change too, via the same late glyph-strip fallback in `fm_composer_classify_content` that does not re-check the `bordered` flag after stripping the glyph.
+This is a pre-existing gap in the bare-shell-prompt safety rule described above under "Composer-emptiness safety", independent of the NBSP fix, and is left for a separate fix.
+
 ## Known gaps and follow-up notes
 
 - **RESOLVED: worktree-discovery isolation guard's symlinked-project-prefix false refusal.** Originally discovered while building the runtime-backend-auto-detection real smoke test (`tests/fm-backend-autodetect-smoke.test.sh`), which needed a scratch project.

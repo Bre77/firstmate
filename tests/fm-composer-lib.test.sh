@@ -125,6 +125,35 @@ test_real_text_is_pending() {
   pass "fm_composer_classify_content: real unsubmitted text reads pending (including a popup argument-hint fill)"
 }
 
+# --- NBSP-padded empty composer reads empty, not pending ---------------------
+# The 2026-07-16..07-21 away-mode injection wedges: an idle claude composer's
+# only content was the bare "❯" prompt glyph followed by a NON-BREAKING SPACE
+# (U+00A0), carrying no ANSI styling at all - so the ghost stripper never
+# applied - yet bash's [:space:] trim does not strip U+00A0, so the byte
+# survived every trim/glyph-strip step and read as leftover real content.
+
+NBSP=$'\xc2\xa0'
+
+test_nbsp_padded_glyph_is_empty() {
+  local out
+  out=$(classify 0 "❯${NBSP}")
+  [ "$out" = empty ] || fail "a bare '❯' padded with a trailing NBSP should be empty, got '$out'"
+  out=$(classify 1 "❯${NBSP}")
+  [ "$out" = empty ] || fail "a bordered '❯' padded with a trailing NBSP should be empty, got '$out'"
+  out=$(classify 0 '' '' sensitive "❯${NBSP}")
+  [ "$out" = empty ] || fail "an empty-content/NBSP-padded plain_content fallback should be empty, got '$out'"
+  pass "fm_composer_classify_content: an NBSP-padded empty composer reads empty, not pending (the 2026-07-16..07-21 wedge)"
+}
+
+test_nbsp_padding_does_not_mask_real_text() {
+  local out
+  out=$(classify 0 "❯${NBSP}fix the login bug")
+  [ "$out" = pending ] || fail "real text after glyph+NBSP padding should still be pending, got '$out'"
+  out=$(classify 0 "❯ fix${NBSP}the login bug")
+  [ "$out" = pending ] || fail "real text carrying an interior NBSP should still be pending, got '$out'"
+  pass "fm_composer_classify_content: NBSP normalization never masks real unsubmitted text as empty"
+}
+
 # --- Queued-message hint reads empty, always, regardless of caller idle_re ---
 # fm-send false-negative incident: a busy pane accepts a steer as a QUEUED
 # message and clears its composer, but shows this hint - and the old
@@ -154,4 +183,6 @@ test_empty_content_is_empty
 test_idle_placeholder_is_empty
 test_idle_placeholder_case_mode_is_explicit
 test_real_text_is_pending
+test_nbsp_padded_glyph_is_empty
+test_nbsp_padding_does_not_mask_real_text
 test_queued_hint_is_empty_standalone_and_inline
