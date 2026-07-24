@@ -171,9 +171,9 @@ test_state_startup_and_ordinary_recovery_placement() {
 }
 
 test_compressed_agents_owner_map() {
-  assert_grep '`docs/configuration.md` is the single owner of the operational-home layout' "$AGENTS" \
+  assert_grep '`docs/configuration.md` is the single owner of the top-level operational-home layout' "$AGENTS" \
     "AGENTS.md lost the state-layout owner pointer"
-  assert_grep 'header is the single owner of composed commands, ordering, digest contents' "$AGENTS" \
+  assert_grep 'header is the single owner of composed commands, ordering, and digest contents' "$AGENTS" \
     "AGENTS.md lost the session-start owner pointer"
   assert_grep '`docs/configuration.md` owns dispatch-profile and runtime-backend schemas' "$AGENTS" \
     "AGENTS.md lost the dispatch-schema owner pointer"
@@ -190,6 +190,33 @@ test_compressed_agents_owner_map() {
   assert_grep '`docs/configuration.md` owns activation, generated state, cadence, wire protocol' "$AGENTS" \
     "AGENTS.md lost the X-mode mechanics owner pointer"
   pass "compressed AGENTS.md records the approved one-owner map"
+}
+
+test_intake_reuses_evidence_and_parallelizes_safe_work() {
+  for phrase in \
+    'consult existing reports and established evidence' \
+    'remaining bounded research inside it' \
+    'unresolved uncertainty could materially change whether or what to build' \
+    'relay it without a design-only scout' \
+    'ask one concise implementation question when useful' \
+    'Never both present a likely-enough solution' \
+    'overlap as a risk signal rather than an automatic reason to wait' \
+    'independently implemented and validated' \
+    'selected delivery path can reconcile ordinary rebases or conflicts' \
+    'Serialize only for a true semantic dependency' \
+    'shared mutable external state' \
+    'incompatible concurrent migration' \
+    'same-file editing alone is insufficient' \
+    'genuine blockers remain durable'; do
+    assert_grep "$phrase" "$AGENTS" "intake contract lost '$phrase'"
+  done
+  assert_grep 'dispatch isolated work immediately with no concurrency cap' "$AGENTS" \
+    "intake contract lost unbounded safe parallel dispatch"
+  assert_grep 'captain explicitly requests a separate knowledge or design deliverable' "$AGENTS" \
+    "intake contract lost captain-requested separate scouts"
+  assert_grep 'When implementation is separately authorized, promote the existing scout' "$AGENTS" \
+    "intake contract lost genuine scout promotion"
+  pass "intake reuses evidence, reserves scouts for uncertainty, and parallelizes safe work"
 }
 
 test_compressed_agents_retains_authority_and_supervision_safety() {
@@ -229,4 +256,5 @@ test_shared_authoring_requirements_are_owned
 test_secondmate_registry_contract_stays_concise
 test_state_startup_and_ordinary_recovery_placement
 test_compressed_agents_owner_map
+test_intake_reuses_evidence_and_parallelizes_safe_work
 test_compressed_agents_retains_authority_and_supervision_safety

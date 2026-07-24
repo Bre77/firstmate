@@ -3,14 +3,17 @@ Mode: Pi extension background wake.
 When this session owns supervision and away mode is not active:
 1. Drain first with `bin/fm-wake-drain.sh`.
 2. Confirm the Pi primary auto-loaded both project extensions (plain `pi`, after approving project trust once per clone); if not, restart with `-e __FM_PI_TURNEND_EXT__ -e __FM_PI_EXT__` as a trust-free fallback.
-3. Arm supervision with the `fm_watch_arm_pi` tool.
+3. First cycle only: make the one required `fm_watch_arm_pi` call.
    Use `/fm-watch-arm-pi` only as a human-entered fallback.
    Never run `bin/fm-watch-arm.sh` through Pi's bash tool because that foreground arm can wedge the agent and bypasses extension-owned cleanup.
 4. If the extension says no live session holds the lock, run `bin/fm-session-start.sh` to reclaim the session lock, then call `fm_watch_arm_pi` again.
-5. The extension starts `bin/fm-watch-arm.sh --restart`, keeps the child attached to the live Pi process, and sends a follow-up user message when the child exits with an actionable watcher reason.
-6. If the extension says the watcher is already healthy, do not start another cycle.
-7. If the extension reports a watcher failure, drain queued wakes, inspect the failure text, and restart Pi with both extensions loaded if needed.
-8. Never use shell `&` for watcher supervision.
+5. The extension starts `bin/fm-watch-arm.sh --restart`, keeps the child attached to the live Pi process, and owns every later successor launch.
+6. After an actionable child close, the extension rechecks session-lock ownership and verifies one successor before it delivers the follow-up wake; its bounded fallback is defined in `docs/watcher-continuity.md`.
+7. Ordinary work, turn completion, and ordinary signal, stale, check, heartbeat, or other wake handling: do not call `fm_watch_arm_pi` again because continuity is extension-owned rather than model-memory-owned.
+8. An unexpected child close enters bounded exponential retry, and an exhausted retry or lost session lock is surfaced as a watcher failure instead of disappearing.
+9. Missing, failed, or unhealthy cycle only: if a later notification explicitly reports one of those repair conditions, drain queued wakes, inspect the failure text, call `fm_watch_arm_pi`, and restart Pi with both extensions loaded if needed.
+   A redundant call while the extension owns an arm child or scheduled retry is an ownership-based `watcher: unchanged` no-op, not an independent health claim.
+10. Never use shell `&` for watcher supervision.
    The arm mechanism above is extension-owned, not a model tool call, but a manual recovery probe that backgrounds, pipes, or bundles the arm is denied automatically by the PreToolUse seatbelt (`bin/fm-arm-pretool-check.sh`, wired into the turn-end guard extension at `__FM_PI_TURNEND_EXT__`).
 
 The turn-end guard extension lives at `__FM_PI_TURNEND_EXT__`.
@@ -27,3 +30,19 @@ Command run for the complete interactive regression: `FM_PI_LIVE_E2E=1 tests/fm-
 Observed output: `ok - Pi 0.80.5 live E2E rendered the tool, guarded once, woke, re-armed, and cleaned up on exit`.
 Command run for the installed-type contract: `tests/fm-pi-primary-types.test.sh`.
 Observed output: `ok - Pi primary extensions pass strict no-emit typecheck against Pi 0.80.5`.
+
+Continuity verification on 2026-07-17 used Pi 0.80.10 with the existing shared Pi credential store and the explicit `openai-codex/gpt-5.6-sol` provider/model pin.
+The isolated live test copied no credential material and created no account.
+The model called `fm_watch_arm_pi` exactly once, an actionable status closed that cycle, the extension ledger-linked a verified successor before the handling turn ended, the turn-end guard never fired, and `/quit` cleaned up both child processes.
+Command: `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh`.
+Observed output: `ok - Pi 0.80.10 live E2E used shared Codex auth, auto-started one successor before turn end, and cleaned up`.
+
+Continuity and Calm verification on 2026-07-23 used Pi 0.81.1 with the existing shared Pi credential store and the explicit `openai-codex/gpt-5.6-sol` provider/model pin.
+The isolated live test activated Calm, proved Pi's native `Working...` row remained visible during a credentialed provider request, proved no `calm transcript` status appeared, restored Calm off, and then completed the unchanged watcher successor and clean-exit lifecycle.
+Command: `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh`.
+Observed output: `ok - Pi 0.81.1 live E2E covered native Calm Working visibility, Ahoy first/later messages, legacy transcripts, near misses, and watcher continuity`.
+
+Operational follow-up verification on 2026-07-23 used Pi 0.81.1's native TUI and a deterministic in-process provider without credential material.
+It proved one captain answer, exact user-role monitoring envelopes, one intended processing result, Calm loaded on, Calm loaded off, Calm absent, adjacent coalesced notifications, and restart with persisted Calm state.
+Command: `tests/fm-calm-pi-extension.test.sh`.
+Observed output: `ok - Pi operational follow-up E2E preserves one captain answer, exact user-role monitoring turns, Calm on/off/absent behavior, adjacent coalescing, genuine prompts, and restart persistence`.

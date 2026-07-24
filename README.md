@@ -31,7 +31,7 @@ But the moment you want three project tasks done in parallel - fixes, investigat
 
 firstmate flips the model.
 You talk to a single agent - the first mate - and it runs the crew for you: spawning autonomous agents in a visible session backend, giving each a clean git worktree, supervising them to completion, and handing you finished PRs, approved local merges, or standalone investigation reports.
-For larger fleets, you can opt in to persistent secondmates: domain supervisors that are still ordinary direct reports, but run from their own isolated firstmate homes.
+For larger fleets, you can opt in to persistent secondmates: second mates that are still ordinary direct reports, but run from their own isolated firstmate homes.
 
 firstmate is not a model, not a harness, not a skill, not an MCP server, and not a CLI.
 firstmate is an agent distro for running a crew of agents.
@@ -44,12 +44,12 @@ Launching a supported harness inside it instantiates your first mate - and makes
 - **One liaison** - you talk only to the first mate; it dispatches, supervises, escalates only real decisions, and reports plain outcomes.
 - **A visible crew** - every crewmate works in its own tmux window, experimental herdr/zellij tab, cmux workspace, or Orca terminal you can watch or type into; the first mate reconciles.
 - **Disposable worktrees** - each task runs in a clean [treehouse](https://github.com/kunchenguid/treehouse) git worktree, or an Orca-managed worktree when `backend=orca`, so parallel work on one repo never collides.
-- **Two task shapes** - ship tasks deliver a change; scout tasks investigate, plan, reproduce, or audit and leave a report.
+- **Two task shapes** - ship tasks deliver authorized changes; scout tasks leave standalone investigation reports when the intake contract warrants separate research.
 - **Explicit project modes** - each project ships via `no-mistakes`, `direct-PR`, or `local-only`, with an optional `+yolo` autonomy flag.
-- **Optional secondmates** - opt in to persistent domain supervisors that run from isolated firstmate homes with their own `FM_HOME`, state, projects, and session lock, supervising project clones or a project-less firstmate-repo domain, kept on the primary firstmate version by guarded local fast-forwards and checked for live agent processes at session start.
+- **Optional secondmates** - opt in to persistent second mates that run from isolated firstmate homes with their own `FM_HOME`, state, projects, and session lock, supervising project clones or a project-less firstmate-repo domain, kept on the primary firstmate version by guarded local fast-forwards and checked for live agent processes at session start.
 - **Event-driven, zero-token supervision** - a bash watcher sleeps on the fleet and wakes the first mate only when something needs you; verified primary harnesses also get a turn-end backstop that blocks or follows up on a blind stop when work is under way and supervision is not live.
 - **Optional X mode** - opt in with one local `.env` token so firstmate can answer your public `@myfirstmate` mentions, act on normal reversible mention requests through the same lifecycle as chat requests, acknowledge spawned work, and post up to three public-safe completion follow-ups within seven days for genuine milestones and the final outcome without changing non-X behavior; dry-run preview records would-be replies and dismissals locally before go-live.
-- **Guarded by construction** - the first mate is read-only over your projects outside guarded clone refreshes, safe branch pruning, and approved `local-only` fast-forward merges; crewmates make every project change behind the configured merge authority.
+- **Guarded by construction** - the first mate is read-only over your projects except for the guarded paths authorized by [hard rule 1](AGENTS.md#1-identity-and-prime-directives), with fleet sync's safe branch pruning remaining part of the fleet-sync exception; crewmates make every project change behind the configured merge authority.
 - **Restart-proof** - all state lives on disk and in the active session backend (tmux by hard default, herdr or cmux when selected or auto-detected, zellij/orca when explicitly selected); kill the session anytime and the next one reconciles, including confirmed-dead secondmate agents, and carries on.
 
 Full detail on every feature lives in [docs/architecture.md](docs/architecture.md).
@@ -102,7 +102,17 @@ pi
 ```
 
 For Grok, `--trust` is needed once per clone so project hooks and the turn-end guard load; `/hooks-trust` inside Grok works too.
-For Pi, approve the project trust prompt once per clone on first launch so both tracked `.pi/extensions/*.ts` files auto-load.
+For Pi, approve the project trust prompt once per clone on first launch so the tracked `.pi/extensions/*.ts` files auto-load.
+`/calm` is a conversation-focused transcript toggle whose last choice persists for the effective Firstmate home across Pi session starts and resumes.
+While active, it keeps Pi's built-in `Working...` activity visible and uses Pi's presentation surface to hide collapsed thinking blocks, all seven built-in tool shells, the Firstmate watcher tool shell, and compatible presentation entries stored by earlier Calm versions.
+Calm adds no persistent status row, and controllable hidden rows are removed without reserving vertical space.
+Canonically typed Firstmate operational input remains an ordinary user-role message with its exact origin, ordering, model authority, and session persistence unchanged.
+Pi 0.81.1 exposes no supported renderer for ordinary user rows, so those operational rows remain visible rather than being semantically rerouted or risking a duplicate or lost turn; the session-start nudge remains on its existing non-displayed custom-message path.
+Toggling off restores ordinary rendering, and `Ctrl+O` expansion behavior stays unchanged.
+Tool execution, model context, session storage, diagnostics, and `/export` and `/share` operation remain unchanged.
+Exports and shares remain complete session artifacts, including visible current operational user messages and any legacy hidden custom messages retained in serialized session data and Pi 0.81.1's sidebar tree.
+Pi 0.81.1 still exposes no global transcript filter, so expanded reasoning, built-in tool images, user-bash rows, skill and summary rows, status notices, and arbitrary custom-tool or extension rows remain supported-API boundaries.
+The version-scoped feasibility evidence and complete render taxonomy are recorded in [docs/calm-mode-feasibility.md](docs/calm-mode-feasibility.md).
 
 ### Talk to it
 
@@ -151,7 +161,7 @@ Setup guides for tmux (the default) and every other supported backend (herdr, ze
 
 You chat with the first mate.
 It routes each request to a crewmate in its own session endpoint and git worktree, supervises the fleet with a zero-token event-driven watcher, and brings you finished PRs, approved local merges, or investigation reports.
-Optional secondmates extend this to persistent domain supervisors, dispatch profiles let you steer which harness handles which task, and an opt-in X mode lets the same fleet answer public mentions.
+Optional secondmates extend this to persistent second mates, dispatch profiles let you steer which harness handles which task, and an opt-in X mode lets the same fleet answer public mentions.
 `codex-app` is not a runtime backend yet; [docs/codex-app-backend.md](docs/codex-app-backend.md) owns the Codex App boundary.
 
 Full architecture - the supervision engine, worktree isolation, secondmates, dispatch profiles, project modes, optional X mode, fleet sync, and self-update - is in [docs/architecture.md](docs/architecture.md).
@@ -164,6 +174,7 @@ Claude and grok use the slash form shown here; codex uses the same names with `$
 | Skill              | What it does                                                                                                                                  |
 | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | `/afk`             | Enter away-mode supervision: the sub-supervisor self-handles routine notifications in bash, escalates captain-relevant events and bounded declared-external-wait rechecks as batched digests, and actively alerts if delivery gets stuck while you step away |
+| `/ahoy`            | Recap only visible session events since the prior real captain message, falling back to Bearings when invoked as the session's first real captain message |
 | `/bearings`        | Generate a standalone current-status report from bounded local fleet and registered-secondmate state, with live PR enrichment only when requested, written to a dated file in `data/` and surfaced concisely in chat; read-mostly, mutates no task state |
 | `/updatefirstmate` | Self-update the running firstmate and its secondmates to the latest from origin with fast-forward-only pulls, then re-read instructions and nudge secondmates |
 | `/stow`            | Sweep the session for uncaptured durable knowledge, route each finding to its disk home per AGENTS.md, file undone next steps to the backlog, and report what is now safe to reset |
@@ -191,6 +202,7 @@ Firstmate's skills live in two separate places with different audiences:
 - [docs/orca-backend.md](docs/orca-backend.md) - setup guide for the experimental Orca backend, plus its lifecycle notes and known gaps.
 - [docs/cmux-backend.md](docs/cmux-backend.md) - setup guide for the experimental cmux backend, plus its verification notes and known gaps.
 - [docs/codex-app-backend.md](docs/codex-app-backend.md) - Codex App backend boundary, evidence, and rollout contract.
+- [docs/gitlab-merge-watch.md](docs/gitlab-merge-watch.md) - how the merge watch follows a GitLab merge request on any instance, and the evidence behind it.
 - [docs/turnend-guard.md](docs/turnend-guard.md) - the primary session's structural "no turn ends blind" backstop: verified per-harness hook mechanisms, scoping, loop safety, and fail-open tradeoffs.
 - [docs/supervision-protocols/](docs/supervision-protocols/) - rendered primary-harness watcher protocols for Claude, Codex, OpenCode, Pi, Grok, and unknown harness fallback.
 - [docs/scripts.md](docs/scripts.md) - the `bin/` toolbelt reference.

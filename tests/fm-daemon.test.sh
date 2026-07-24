@@ -526,6 +526,8 @@ test_escalate_batches_into_one_digest() {
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
     FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" \
     || fail "escalate_flush failed"
+  grep -F 'FIRSTMATE_OP: v1 away-supervisor: ' "$sent" >/dev/null \
+    || fail "batch digest lacks the exact current away-supervisor kind"
   grep -F "event A" "$sent" >/dev/null || fail "batch digest missing event A"
   grep -F "event B" "$sent" >/dev/null || fail "batch digest missing event B"
   grep -F 'event A: done: PR 1 | event B: done: PR 2' "$sent" >/dev/null \
@@ -697,9 +699,13 @@ test_marker_detection() {
   marker_hex=$(printf '%s' "$FM_INJECT_MARK" | od -An -tx1 | tr -d ' \n')
   [ "$marker_hex" = e281a3 ] \
     || fail "FM_INJECT_MARK must use terminal-safe U+2063 bytes, got $marker_hex"
+  [ "$FM_OPERATIONAL_PREFIX" = "${FM_INJECT_MARK}FIRSTMATE_OP: " ] \
+    || fail "away-mode operational prefix drifted from the shared captain-boundary marker"
   # message_is_injection: marker present -> injection; absent -> real message
+  message_is_injection "${FM_OPERATIONAL_PREFIX}Supervisor escalate: done" \
+    || fail "operationally-prefixed message not detected as injection"
   message_is_injection "${FM_INJECT_MARK}Supervisor escalate: done" \
-    || fail "marker-prefixed message not detected as injection"
+    || fail "legacy marker-prefixed message not detected as injection"
   message_is_injection "how's it going?" \
     && fail "plain message misdetected as injection"
   message_is_injection "" && fail "empty message misdetected as injection"
@@ -744,10 +750,18 @@ test_should_exit_afk_when_afk_inactive() {
 }
 
 test_strip_injection_marker() {
-  local stripped
+  local encoded stripped
+  fm_operational_input_encode away-supervisor "Supervisor escalate: done" encoded \
+    || fail "could not encode current away fixture"
+  stripped=$(strip_injection_marker "$encoded")
+  [ "$stripped" = "Supervisor escalate: done" ] \
+    || fail "current typed operational envelope not stripped: '$stripped'"
+  stripped=$(strip_injection_marker "${FM_OPERATIONAL_PREFIX}Supervisor escalate: done")
+  [ "$stripped" = "Supervisor escalate: done" ] \
+    || fail "landed untyped operational prefix not stripped: '$stripped'"
   stripped=$(strip_injection_marker "${FM_INJECT_MARK}Supervisor escalate: done")
   [ "$stripped" = "Supervisor escalate: done" ] \
-    || fail "marker not stripped: '$stripped'"
+    || fail "legacy marker not stripped: '$stripped'"
   # No marker → unchanged.
   stripped=$(strip_injection_marker "no marker here")
   [ "$stripped" = "no marker here" ] \
@@ -911,6 +925,63 @@ test_classify_stale_dedup_against_signal() {
   out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-dup-s10" "$state")
   case "$out" in escalate\|*) ;; *) fail "stale should escalate when not seen: $out" ;; esac
   pass "classify_stale dedupes against the signal path seen marker"
+}
+
+# AFK incident regression: a nonterminal working: line that was already surfaced
+# (seen marker matches, including free-text "merged") must keep possible-wedge
+# aging. handle_wake must record the stale marker; housekeeping re-escalates
+# once at the configured bound.
+test_afk_nonterminal_working_merged_keeps_wedge_aging() {
+  local dir state key out win pane incident fakebin
+  dir=$(make_supercase afk-working-merged-wedge)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  win="sess:fm-wishlist-w1"
+  pane="$dir/pane.txt"
+  incident='working: stage 2 setup complete on PR #74 exact source branch rebased onto merged #76; task dates preserved'
+  printf '%s\n' "$incident" > "$state/wishlist-w1.status"
+  printf 'idle prompt $\n' > "$pane"
+  key=$(printf '%s' "wishlist-w1" | tr ':/.' '___')
+  # Simulate an earlier false-positive escalate that wrote the seen marker.
+  printf '%s' "$incident" > "$state/.subsuper-seen-status-$key"
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "$win" "$state")
+  case "$out" in
+    self\|*transient*) ;;
+    escalate\|*) fail "nonterminal working: escalated as terminal stale: $out" ;;
+    *)
+      case "$out" in
+        *already\ escalated*) fail "nonterminal working: treated as already-escalated terminal: $out" ;;
+        *) fail "nonterminal working: unexpected classify_stale: $out" ;;
+      esac
+      ;;
+  esac
+  FM_STATE_OVERRIDE="$state" handle_wake "stale: $win" "$state"
+  [ -e "$state/.subsuper-stale-$key" ] \
+    || fail "wedge stale marker was not recorded for already-seen nonterminal working:"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "nonterminal working: stale incorrectly escalated immediately"
+  # Age the marker past the escalate bound (marker stores first-seen epoch).
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+  [ -s "$state/.subsuper-escalations" ] \
+    || fail "housekeeping did not re-escalate aged nonterminal working: wedge"
+  grep -q 'possible wedge' "$state/.subsuper-escalations" \
+    || fail "housekeeping escalate was not a possible-wedge: $(cat "$state/.subsuper-escalations")"
+  pass "AFK nonterminal working:+merged keeps wedge aging and re-escalates at bound"
+}
+
+test_afk_genuine_done_still_terminal_stale() {
+  local dir state out
+  dir=$(make_supercase afk-genuine-done-stale)
+  state="$dir/state"
+  printf 'done: PR https://example.com/pull/76 checks green; stage 1 of 4 ready for firstmate merge\n' \
+    > "$state/stage1-w2.status"
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-stage1-w2" "$state")
+  case "$out" in escalate\|*) ;; *) fail "genuine done: stale did not escalate: $out" ;; esac
+  out=$(classify_check "check: /s/t.check.sh: merged")
+  case "$out" in escalate\|*) ;; *) fail "validated merge-check did not escalate: $out" ;; esac
+  pass "genuine done: and merge-check events still escalate"
 }
 
 test_pane_input_pending_bordered_idle_not_pending() {
@@ -1704,6 +1775,8 @@ test_tmux_composer_state_requires_matching_box_borders
 test_pane_input_pending_honors_idle_override_after_border_strip
 test_classify_signal_dedup_against_scan
 test_classify_stale_dedup_against_signal
+test_afk_nonterminal_working_merged_keeps_wedge_aging
+test_afk_genuine_done_still_terminal_stale
 test_pane_input_pending_bordered_idle_not_pending
 test_pane_input_pending_bordered_with_text_is_pending
 test_submit_ack_confirms_on_bordered_empty_composer

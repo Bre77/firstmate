@@ -124,7 +124,7 @@ run_spawn_with_env() {
 
 expected_unwrapped_claude_launch() {
   local brief=$1
-  printf '%s' "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$(cat '$brief')\""
+  printf '%s' "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('$ROOT/bin/fm-operational-input.sh' encode launch-brief < '$brief')\""
 }
 
 # Given a full launch string wrapped as:
