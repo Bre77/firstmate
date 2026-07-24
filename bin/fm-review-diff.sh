@@ -10,11 +10,13 @@
 # firstmate-fork) is the UPSTREAM repo, unrelated to the fork the task actually
 # branched from, so comparing against origin/<default> there would show the
 # fork's entire upstream delta instead of just the task's change.
-# When state/<id>.meta records pr= for an open PR, the compare side is the PR
-# head (recorded pr_head= when reachable, else refs/pull/<n>/head fetched from
-# the same remote as the base - origin normally, fork for a fork-only task) so
-# review stays current after fix rounds push to the PR; if the PR head cannot
-# be resolved, the script falls back to the local branch with a warning.
+# When state/<id>.meta records pr= (URL or number) for an open PR, the compare
+# side is ALWAYS a freshly fetched refs/pull/<n>/head from the base remote (fork
+# for a fork-only task, origin otherwise) so review stays current after
+# no-mistakes fix rounds push to the PR. A recorded pr_head= is only a fallback
+# when fetch fails (stale recorded SHAs must never win over a reachable remote
+# PR head). If neither PR head can be resolved, fall back to the local branch
+# with a warning. Without pr=, compare the local branch.
 # Usage: fm-review-diff.sh <task-id> [--stat]
 #   --stat prints only the stat summary; default prints stat summary plus full diff.
 set -eu
@@ -126,19 +128,35 @@ pr_number_from_target() {
   printf '%s' "$n"
 }
 
+fetch_pull_head() {
+  local remote=$1 n=$2 resolved
+  git -C "$WT" remote get-url "$remote" >/dev/null 2>&1 || return 1
+  # Fetch into a private ref so a later base-branch fetch cannot clobber the
+  # compare tip via FETCH_HEAD, and so we never review a stale local object.
+  git -C "$WT" fetch --quiet "$remote" \
+    "+refs/pull/$n/head:refs/fm-review/pull/$n/head" >/dev/null 2>&1 || return 1
+  resolved=$(git -C "$WT" rev-parse --verify "refs/fm-review/pull/$n/head^{commit}" 2>/dev/null) || return 1
+  [ -n "$resolved" ] || return 1
+  printf '%s' "$resolved"
+}
+
 resolve_pr_head() {
   local pr_url=$1 recorded_head=$2 remote=$3 n resolved
+  n=$(pr_number_from_target "$pr_url") || true
+  if [ -n "$n" ]; then
+    if resolved=$(fetch_pull_head "$remote" "$n"); then
+      printf '%s' "$resolved"
+      return 0
+    fi
+  fi
+  # Offline / unreachable remote: recorded pr_head is better than the local
+  # branch, but never preferred over a successful pull-head fetch above.
   if [ -n "$recorded_head" ] \
     && git -C "$WT" cat-file -e "$recorded_head^{commit}" 2>/dev/null; then
     printf '%s' "$recorded_head"
     return 0
   fi
-  n=$(pr_number_from_target "$pr_url") || return 1
-  git -C "$WT" remote get-url "$remote" >/dev/null 2>&1 || return 1
-  git -C "$WT" fetch --quiet "$remote" "refs/pull/$n/head" >/dev/null 2>&1 || return 1
-  resolved=$(git -C "$WT" rev-parse --verify 'FETCH_HEAD^{commit}' 2>/dev/null) || return 1
-  [ -n "$resolved" ] || return 1
-  printf '%s' "$resolved"
+  return 1
 }
 
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
