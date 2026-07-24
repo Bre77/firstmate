@@ -26,6 +26,11 @@
 #   (g) merge takes precedence in the watcher: once merged, the merge poll
 #       reports "merged" and the watcher never invokes the activity poll (no
 #       gh api calls at all)
+#   (h) a chatgpt-codex-connector review on a newer commit surfaces through
+#       the separate bot-review cursor even when its own submitted_at already
+#       lags a self/crew reply that advanced the general watermark past it
+#   (i) a first-sighted bot review seeds the cursor silently, matching the
+#       general watermark's own no-flood behavior on arm
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -304,6 +309,64 @@ JSON
   pass "the watcher runs the activity poll and surfaces a new PR comment while the tracked PR is still open"
 }
 
+test_bot_review_cursor_seeds_silently_on_first_sighting() {
+  local case_dir url out
+  case_dir=$(make_case bot-cursor-seed)
+  write_gh_mock "$case_dir/fakebin"
+  url="https://github.com/example/repo/pull/61"
+  printf '2020-01-01T00:00:00Z\n' > "$case_dir/home/state/task-x.pr-activity-seen"
+
+  cat > "$case_dir/fixtures/reviews.json" <<'JSON'
+[{"submitted_at":"2019-06-01T00:00:00Z","user":{"login":"chatgpt-codex-connector"},"commit_id":"sha-preexisting","state":"COMMENTED","body":"pre-arm bot review, must not appear"}]
+JSON
+  printf '[]' > "$case_dir/fixtures/issue-comments.json"
+  printf '[]' > "$case_dir/fixtures/review-comments.json"
+
+  out=$(FM_TEST_FIXTURE_ISSUE_COMMENTS="$case_dir/fixtures/issue-comments.json" \
+        FM_TEST_FIXTURE_REVIEW_COMMENTS="$case_dir/fixtures/review-comments.json" \
+        FM_TEST_FIXTURE_REVIEWS="$case_dir/fixtures/reviews.json" \
+        run_activity_poll_directly "$case_dir" task-x "$url")
+
+  [ -z "$out" ] || fail "bot-cursor-seed: a first-sighted bot review must seed the cursor silently (got: $out)"
+  assert_grep 'sha-preexisting' "$case_dir/home/state/task-x.pr-bot-review-seen" \
+    "bot-cursor-seed: the cursor file must be seeded with the newest bot review's commit SHA"
+  pass "a first-sighted bot review seeds the cursor silently instead of surfacing pre-arm history"
+}
+
+test_bot_review_surfaces_despite_self_reply_watermark_race() {
+  local case_dir url out
+  case_dir=$(make_case bot-cursor-race)
+  write_gh_mock "$case_dir/fakebin"
+  url="https://github.com/example/repo/pull/91"
+
+  # Round 2 bot review already surfaced and recorded by the cursor in an
+  # earlier poll; the general watermark already sits past a later self/crew
+  # reply too, exactly reproducing the captain-caught scenario: node #7's
+  # crew replied on its own PR as Bre77 after round 2, advancing the general
+  # watermark past a round-3 review whose own submitted_at lags behind it.
+  printf 'sha-round2\n' > "$case_dir/home/state/task-x.pr-bot-review-seen"
+  printf '2021-06-01T00:00:00Z\n' > "$case_dir/home/state/task-x.pr-activity-seen"
+
+  cat > "$case_dir/fixtures/reviews.json" <<'JSON'
+[{"submitted_at":"2021-05-01T00:00:00Z","user":{"login":"chatgpt-codex-connector"},"commit_id":"sha-round3","state":"CHANGES_REQUESTED","body":"round 3: still missing error handling"}]
+JSON
+  printf '[]' > "$case_dir/fixtures/issue-comments.json"
+  printf '[]' > "$case_dir/fixtures/review-comments.json"
+
+  out=$(FM_TEST_FIXTURE_ISSUE_COMMENTS="$case_dir/fixtures/issue-comments.json" \
+        FM_TEST_FIXTURE_REVIEW_COMMENTS="$case_dir/fixtures/review-comments.json" \
+        FM_TEST_FIXTURE_REVIEWS="$case_dir/fixtures/reviews.json" \
+        run_activity_poll_directly "$case_dir" task-x "$url")
+
+  assert_contains "$out" "pr-comment task-x chatgpt-codex-connector (review): round 3: still missing error handling" \
+    "bot-cursor-race: a newer bot review must surface via the cursor even though its own timestamp already lags the general watermark"
+  assert_grep 'sha-round3' "$case_dir/home/state/task-x.pr-bot-review-seen" \
+    "bot-cursor-race: the cursor must advance to the newer bot review's commit SHA"
+  assert_grep '2021-06-01T00:00:00Z' "$case_dir/home/state/task-x.pr-activity-seen" \
+    "bot-cursor-race: the general watermark is untouched when nothing else is new"
+  pass "a new bot review on a newer commit surfaces via the cursor despite an intervening self/crew reply's timestamp race"
+}
+
 test_rearm_does_not_touch_watermark
 test_defensive_missing_watermark_initializes_silently
 test_poll_surfaces_new_activity_and_advances_watermark
@@ -311,3 +374,5 @@ test_wake_line_truncates_long_body
 test_gh_api_error_body_not_treated_as_activity
 test_watcher_merge_takes_precedence_no_activity_poll
 test_watcher_surfaces_pr_comment_when_open
+test_bot_review_cursor_seeds_silently_on_first_sighting
+test_bot_review_surfaces_despite_self_reply_watermark_race
