@@ -18,6 +18,18 @@
 # Each poll advances the watermark to the newest timestamp it actually
 # surfaced; a poll that finds nothing new leaves it untouched.
 #
+# Bot-review cursor: state/<id>.pr-bot-review-seen holds the commit SHA of the
+# newest chatgpt-codex-connector review this task has surfaced. It exists
+# because crews reply on their own PRs under the captain's git identity, and a
+# self/crew reply between two bot reviews can advance the single timestamp
+# watermark past an intervening bot review that was never actually surfaced,
+# silently skipping the next one. The cursor sidesteps timestamp ordering
+# entirely: any bot review whose commit SHA differs from the stored cursor
+# surfaces, regardless of what advanced the general watermark in between. Like
+# the general watermark, a missing cursor seeds silently from the newest bot
+# review found rather than surfacing it, so introducing this file on an
+# already-armed task cannot flood the wake with pre-existing history.
+#
 # Three gh api calls per poll: issue comments and inline review comments both
 # take a server-side `since`, cutting response size on a chatty PR; the
 # reviews endpoint has no `since` support, so its whole list is fetched and
@@ -48,6 +60,8 @@ command -v gh >/dev/null 2>&1 || exit 0
 
 mkdir -p "$STATE" 2>/dev/null || exit 0
 WATERMARK_FILE="$STATE/$ID.pr-activity-seen"
+BOT_REVIEW_AUTHOR="chatgpt-codex-connector"
+BOT_WATERMARK_FILE="$STATE/$ID.pr-bot-review-seen"
 
 if [ ! -f "$WATERMARK_FILE" ]; then
   date -u +%Y-%m-%dT%H:%M:%SZ > "$WATERMARK_FILE" 2>/dev/null
@@ -97,26 +111,70 @@ review_comments=$(gh api "repos/$OWNER/$REPO/pulls/$NUMBER/comments" --method GE
   -q ".[] | select(.created_at > \"$WATERMARK\") | [.created_at, (.user.login // \"unknown\"), \"review-comment\", (.body // \"\")] | @tsv" \
   2>/dev/null) || review_comments=""
 
-reviews=$(gh api "repos/$OWNER/$REPO/pulls/$NUMBER/reviews" --method GET --paginate \
-  -q ".[] | select(.submitted_at != null and .submitted_at > \"$WATERMARK\") | [.submitted_at, (.user.login // \"unknown\"), \"review\", ((.body // \"\") as \$b | if (\$b | length) > 0 then \$b else (.state // \"\") end)] | @tsv" \
-  2>/dev/null) || reviews=""
+# commit_id rides along unfiltered by time so the bot-review cursor below can
+# key off it; the reviews endpoint has no server-side `since` regardless, so
+# fetching the whole list costs nothing extra. commit_id defaults to the
+# literal "none", never empty: `read -d $'\t'` collapses a genuinely empty
+# middle field into its neighbor the same way default IFS whitespace-splitting
+# does, which would silently shift every column after it.
+reviews_raw=$(gh api "repos/$OWNER/$REPO/pulls/$NUMBER/reviews" --method GET --paginate \
+  -q ".[] | select(.submitted_at != null) | [.submitted_at, (.user.login // \"unknown\"), (.commit_id // \"none\"), ((.body // \"\") as \$b | if (\$b | length) > 0 then \$b else (.state // \"\") end)] | @tsv" \
+  2>/dev/null) || reviews_raw=""
+
+review_lines=()
+bot_ts=""
+bot_commit=""
+bot_body=""
+while IFS=$'\t' read -r ts author commit_id body; do
+  [ -n "$ts" ] || continue
+  if [[ "$ts" > "$WATERMARK" ]]; then
+    review_lines+=("$(printf '%s\t%s\treview\t%s' "$ts" "$author" "$body")")
+  fi
+  if [ "$author" = "$BOT_REVIEW_AUTHOR" ] && { [ -z "$bot_ts" ] || [[ "$ts" > "$bot_ts" ]]; }; then
+    bot_ts=$ts
+    bot_commit=$commit_id
+    bot_body=$body
+  fi
+done <<< "$reviews_raw"
+reviews=""
+[ "${#review_lines[@]}" -eq 0 ] || reviews=$(printf '%s\n' "${review_lines[@]}")
 
 all=$(printf '%s\n%s\n%s\n' "$comments" "$review_comments" "$reviews" | grep -v '^$')
-[ -n "$all" ] || exit 0
 
-sorted=$(printf '%s\n' "$all" | LC_ALL=C sort -t "$(printf '\t')" -k1,1)
+# Guards only the general print-and-advance step, not the bot-review cursor
+# below: a poll can have nothing new in the general set (e.g. a bot review
+# whose timestamp already lags the watermark) while still needing to surface
+# via the cursor, so the cursor check must never be short-circuited here.
+if [ -n "$all" ]; then
+  sorted=$(printf '%s\n' "$all" | LC_ALL=C sort -t "$(printf '\t')" -k1,1)
 
-newest="$WATERMARK"
-while IFS=$'\t' read -r ts author kind body; do
-  [ -n "$ts" ] || continue
-  display=$(squash_body "$body")
-  display="${display:0:120}"
-  printf 'pr-comment %s %s (%s): %s\n' "$ID" "$author" "$kind" "$display"
-  if [[ "$ts" > "$newest" ]]; then
-    newest=$ts
+  newest="$WATERMARK"
+  while IFS=$'\t' read -r ts author kind body; do
+    [ -n "$ts" ] || continue
+    display=$(squash_body "$body")
+    display="${display:0:120}"
+    printf 'pr-comment %s %s (%s): %s\n' "$ID" "$author" "$kind" "$display"
+    if [[ "$ts" > "$newest" ]]; then
+      newest=$ts
+    fi
+  done <<< "$sorted"
+
+  if [ "$newest" != "$WATERMARK" ]; then
+    printf '%s\n' "$newest" > "$WATERMARK_FILE"
   fi
-done <<< "$sorted"
+fi
 
-if [ "$newest" != "$WATERMARK" ]; then
-  printf '%s\n' "$newest" > "$WATERMARK_FILE"
+if [ -n "$bot_commit" ]; then
+  bot_seen=""
+  [ -f "$BOT_WATERMARK_FILE" ] && bot_seen=$(tr -d '[:space:]' < "$BOT_WATERMARK_FILE" 2>/dev/null)
+  if [ -z "$bot_seen" ]; then
+    printf '%s\n' "$bot_commit" > "$BOT_WATERMARK_FILE" 2>/dev/null
+  elif [ "$bot_commit" != "$bot_seen" ]; then
+    if ! [[ "$bot_ts" > "$WATERMARK" ]]; then
+      display=$(squash_body "$bot_body")
+      display="${display:0:120}"
+      printf 'pr-comment %s %s (review): %s\n' "$ID" "$BOT_REVIEW_AUTHOR" "$display"
+    fi
+    printf '%s\n' "$bot_commit" > "$BOT_WATERMARK_FILE" 2>/dev/null
+  fi
 fi
