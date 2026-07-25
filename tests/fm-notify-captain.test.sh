@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
-# Behavior tests for bin/fm-notify-captain.sh: the Pushover last-hop notifier
+# Behavior tests for bin/fm-notify-captain.sh: the Better Stack last-hop pager
 # from the captain-alert-channel-b3 investigation (fork-only firstmate
 # feature).
 #
-# Covers: tier -> Pushover priority mapping and retry/expire env overrides
+# Covers: tier -> notification-channel mapping and the team-wait env override
 # (all exercised through --dry-run, which makes no external calls), the
 # dry-run send-nothing guarantee (tripwire mocks that fail the test if
 # invoked), and every documented loud-failure path (missing
 # OP_SERVICE_ACCOUNT_TOKEN, an absent op binary, a missing or empty 1Password
-# field on either the "username" or "credential" field, and a non-2xx
-# Pushover response). A final pair of success-path cases mocks op and curl to
-# confirm the emergency-tier receipt is printed and that the Pushover user key
-# and application token never appear in curl's argv. No test sends a real
-# push: op and curl are always PATH-shimmed mocks.
+# field on either the "username" or "credential" field, a non-2xx Better Stack
+# response, and an accepted page whose response carries no incident id). The
+# success-path cases mock op and curl to confirm the incident body always
+# carries a `name` (an incident with none reaches the phone titled "API
+# request"), that the two tiers really differ, that the API token never
+# appears in curl's argv, and that --resolve closes an incident. No test pages
+# anyone: op and curl are always PATH-shimmed mocks.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -40,12 +42,12 @@ for ((i = 1; i <= $#; i++)); do
   fi
 done
 case "$field" in
-  username) val=${FM_TEST_OP_USERNAME-real-user-key} ;;
-  credential) val=${FM_TEST_OP_CREDENTIAL-real-app-token} ;;
+  username) val=${FM_TEST_OP_USERNAME-captain@example.com} ;;
+  credential) val=${FM_TEST_OP_CREDENTIAL-real-api-token} ;;
   *) echo "op mock: unexpected --fields value: $field" >&2; exit 1 ;;
 esac
 case "$val" in
-  __MISSING__) echo "[ERROR] '$field' isn't a field in the \"Pushover\" item." >&2; exit 1 ;;
+  __MISSING__) echo "[ERROR] '$field' isn't a field in the \"BetterStack API Token\" item." >&2; exit 1 ;;
   __EMPTY__) printf '' ;;
   *) printf '%s' "$val" ;;
 esac
@@ -54,8 +56,9 @@ SH
 }
 
 # curl mock driven by FM_TEST_CURL_HTTP_CODE / FM_TEST_CURL_BODY. Logs its full
-# argv to FM_TEST_CURL_ARGV_LOG (when set) so a test can assert secrets never
-# appear there, and the POST body it received on stdin to FM_TEST_CURL_STDIN_LOG.
+# argv to FM_TEST_CURL_ARGV_LOG (when set) so a test can assert the API token
+# never appears there, and the config file it received on stdin to
+# FM_TEST_CURL_STDIN_LOG.
 write_curl_mock() {
   local fakebin=$1
   cat > "$fakebin/curl" <<'SH'
@@ -110,9 +113,16 @@ new_case() {
   printf '%s\n' "$case_dir"
 }
 
-# --- tier -> priority mapping (dry-run; no external calls) ------------------
+# The JSON body the script handed curl, recovered from the config file it wrote
+# to curl's stdin.
+body_from_config() {
+  local stdin_log=$1
+  sed -n 's/^data-raw = "\(.*\)"$/\1/p' "$stdin_log" | sed -e 's/\\"/"/g' -e 's/\\\\/\\/g'
+}
 
-test_dry_run_urgent_maps_to_priority_1() {
+# --- tier -> channel mapping (dry-run; no external calls) --------------------
+
+test_dry_run_urgent_is_a_critical_push_without_a_call() {
   local case_dir out rc
   case_dir=$(new_case dry-urgent)
 
@@ -122,13 +132,14 @@ test_dry_run_urgent_maps_to_priority_1() {
   set -e
 
   expect_code 0 "$rc" "dry-urgent: --dry-run should succeed"
-  assert_contains "$out" "tier=urgent priority=1" "dry-urgent: urgent tier did not map to priority 1"
-  assert_not_contains "$out" "retry=" "dry-urgent: urgent tier should not print retry/expire"
-  assert_contains "$out" "user=<REDACTED> token=<REDACTED>" "dry-urgent: secrets were not redacted in dry-run output"
-  pass "fm-notify-captain maps tier=urgent to Pushover priority 1"
+  assert_contains "$out" "tier=urgent push=true critical_alert=true call=false" \
+    "dry-urgent: urgent tier did not map to a critical push without a phone call"
+  assert_not_contains "$out" "team_wait=" "dry-urgent: urgent tier should not escalate to the team"
+  assert_contains "$out" "requester_email=<REDACTED> token=<REDACTED>" "dry-urgent: secrets were not redacted in dry-run output"
+  pass "fm-notify-captain maps tier=urgent to a critical push with no phone call"
 }
 
-test_dry_run_emergency_maps_to_priority_2_with_defaults() {
+test_dry_run_emergency_adds_a_call_and_team_escalation() {
   local case_dir out rc
   case_dir=$(new_case dry-emergency-defaults)
 
@@ -138,66 +149,66 @@ test_dry_run_emergency_maps_to_priority_2_with_defaults() {
   set -e
 
   expect_code 0 "$rc" "dry-emergency-defaults: --dry-run should succeed"
-  assert_contains "$out" "tier=emergency priority=2" "dry-emergency-defaults: emergency tier did not map to priority 2"
-  assert_contains "$out" "retry=30 expire=3600" "dry-emergency-defaults: default retry/expire were not 30/3600"
-  pass "fm-notify-captain maps tier=emergency to Pushover priority 2 with default retry/expire"
+  assert_contains "$out" "tier=emergency push=true critical_alert=true call=true" \
+    "dry-emergency-defaults: emergency tier did not add a phone call"
+  assert_contains "$out" "team_wait=300" "dry-emergency-defaults: default team wait was not 300 seconds"
+  pass "fm-notify-captain maps tier=emergency to a critical push plus a call and team escalation"
 }
 
-test_dry_run_respects_retry_expire_env_overrides() {
+test_dry_run_respects_team_wait_override() {
   local case_dir out rc
-  case_dir=$(new_case dry-emergency-overrides)
+  case_dir=$(new_case dry-emergency-override)
 
   set +e
-  out=$(FM_NOTIFY_RETRY=45 FM_NOTIFY_EXPIRE=1800 \
-    run_notify "$case_dir" --tier emergency --dry-run "still down" 2>&1)
+  out=$(FM_NOTIFY_TEAM_WAIT=60 run_notify "$case_dir" --tier emergency --dry-run "still down" 2>&1)
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "dry-emergency-overrides: --dry-run should succeed"
-  assert_contains "$out" "retry=45 expire=1800" "dry-emergency-overrides: FM_NOTIFY_RETRY/FM_NOTIFY_EXPIRE were not honored"
-  pass "fm-notify-captain honors FM_NOTIFY_RETRY and FM_NOTIFY_EXPIRE overrides"
+  expect_code 0 "$rc" "dry-emergency-override: --dry-run should succeed"
+  assert_contains "$out" "team_wait=60" "dry-emergency-override: FM_NOTIFY_TEAM_WAIT was not honored"
+  pass "fm-notify-captain honors FM_NOTIFY_TEAM_WAIT"
 }
 
-test_retry_below_minimum_rejected() {
+test_non_numeric_team_wait_rejected() {
   local case_dir out rc
-  case_dir=$(new_case retry-too-low)
+  case_dir=$(new_case team-wait-non-numeric)
 
   set +e
-  out=$(FM_NOTIFY_RETRY=10 run_notify "$case_dir" --tier emergency --dry-run "msg" 2>&1)
+  out=$(FM_NOTIFY_TEAM_WAIT=soon run_notify "$case_dir" --tier emergency --dry-run "msg" 2>&1)
   rc=$?
   set -e
 
-  expect_code 1 "$rc" "retry-too-low: a retry below Pushover's 30s minimum should be refused"
-  assert_contains "$out" ">= 30 seconds" "retry-too-low: refusal did not explain the 30s minimum"
-  pass "fm-notify-captain refuses an emergency retry below Pushover's 30s minimum"
+  expect_code 1 "$rc" "team-wait-non-numeric: a non-numeric team wait should be refused"
+  assert_contains "$out" "must be a positive integer" "team-wait-non-numeric: refusal did not explain the integer requirement"
+  pass "fm-notify-captain refuses a non-numeric FM_NOTIFY_TEAM_WAIT"
 }
 
-test_expire_above_maximum_rejected() {
+test_zero_team_wait_rejected() {
   local case_dir out rc
-  case_dir=$(new_case expire-too-high)
+  case_dir=$(new_case team-wait-zero)
 
   set +e
-  out=$(FM_NOTIFY_EXPIRE=99999 run_notify "$case_dir" --tier emergency --dry-run "msg" 2>&1)
+  out=$(FM_NOTIFY_TEAM_WAIT=0 run_notify "$case_dir" --tier emergency --dry-run "msg" 2>&1)
   rc=$?
   set -e
 
-  expect_code 1 "$rc" "expire-too-high: an expire above Pushover's 10800s maximum should be refused"
-  assert_contains "$out" "<= 10800 seconds" "expire-too-high: refusal did not explain the 10800s maximum"
-  pass "fm-notify-captain refuses an emergency expire above Pushover's 10800s maximum"
+  expect_code 1 "$rc" "team-wait-zero: a zero team wait should be refused"
+  assert_contains "$out" "must be a positive integer" "team-wait-zero: refusal did not explain the integer requirement"
+  pass "fm-notify-captain refuses a zero FM_NOTIFY_TEAM_WAIT"
 }
 
-test_non_numeric_retry_rejected() {
+test_dry_run_titles_the_page_when_no_title_is_given() {
   local case_dir out rc
-  case_dir=$(new_case retry-non-numeric)
+  case_dir=$(new_case dry-default-title)
 
   set +e
-  out=$(FM_NOTIFY_RETRY=soon run_notify "$case_dir" --tier emergency --dry-run "msg" 2>&1)
+  out=$(run_notify "$case_dir" --tier emergency --dry-run "no title given" 2>&1)
   rc=$?
   set -e
 
-  expect_code 1 "$rc" "retry-non-numeric: a non-numeric retry should be refused"
-  assert_contains "$out" "must be a positive integer" "retry-non-numeric: refusal did not explain the integer requirement"
-  pass "fm-notify-captain refuses a non-numeric FM_NOTIFY_RETRY"
+  expect_code 0 "$rc" "dry-default-title: --dry-run should succeed"
+  assert_contains "$out" "title=Firstmate emergency" "dry-default-title: an omitted --title did not fall back to a tier-derived title"
+  pass "fm-notify-captain supplies a default title when --title is omitted"
 }
 
 test_dry_run_sends_nothing() {
@@ -260,6 +271,34 @@ test_missing_message_fails_loud() {
   pass "fm-notify-captain refuses when no message is given"
 }
 
+test_non_numeric_resolve_id_fails_loud() {
+  local case_dir out rc
+  case_dir=$(new_case resolve-non-numeric)
+
+  set +e
+  out=$(run_notify "$case_dir" --resolve "993937396/../../delete" 2>&1)
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "resolve-non-numeric: a non-numeric incident id should be refused"
+  assert_contains "$out" "numeric Better Stack incident id" "resolve-non-numeric: refusal did not require a numeric id"
+  pass "fm-notify-captain refuses a --resolve id that is not a plain number"
+}
+
+test_resolve_with_tier_fails_loud() {
+  local case_dir out rc
+  case_dir=$(new_case resolve-with-tier)
+
+  set +e
+  out=$(run_notify "$case_dir" --resolve 993937396 --tier urgent 2>&1)
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "resolve-with-tier: --resolve plus --tier should be refused"
+  assert_contains "$out" "cannot be combined with --tier" "resolve-with-tier: refusal did not explain the conflict"
+  pass "fm-notify-captain refuses --resolve combined with --tier"
+}
+
 # --- op / secret loud-failure paths ------------------------------------------
 
 test_missing_op_service_account_token_fails_loud() {
@@ -309,7 +348,7 @@ test_missing_credential_field_names_it() {
 
   expect_code 1 "$rc" "missing-credential-field: a missing 'credential' field should be refused"
   assert_contains "$out" "1Password field 'credential'" "missing-credential-field: refusal did not name the 'credential' field exactly"
-  pass "fm-notify-captain names the 'credential' field when the application token is not yet on the Pushover item"
+  pass "fm-notify-captain names the 'credential' field when the API token cannot be read"
 }
 
 test_missing_username_field_names_it() {
@@ -325,7 +364,7 @@ test_missing_username_field_names_it() {
 
   expect_code 1 "$rc" "missing-username-field: a missing 'username' field should be refused"
   assert_contains "$out" "1Password field 'username'" "missing-username-field: refusal did not name the 'username' field"
-  pass "fm-notify-captain names the 'username' field when it cannot be read"
+  pass "fm-notify-captain names the 'username' field when the requester email cannot be read"
 }
 
 test_empty_field_fails_loud() {
@@ -345,84 +384,142 @@ test_empty_field_fails_loud() {
   pass "fm-notify-captain refuses an empty 1Password field"
 }
 
-# --- Pushover API response handling ------------------------------------------
+# --- Better Stack API response handling --------------------------------------
 
-test_non_2xx_response_prints_errors_array() {
+test_non_2xx_response_prints_errors() {
   local case_dir out rc
   case_dir=$(new_case non-2xx)
   write_op_mock "$case_dir/fakebin"
   write_curl_mock "$case_dir/fakebin"
 
   set +e
-  out=$(FM_TEST_CURL_HTTP_CODE=400 \
-    FM_TEST_CURL_BODY='{"status":0,"errors":["message parameter is required"],"request":"req-err"}' \
+  out=$(FM_TEST_CURL_HTTP_CODE=422 \
+    FM_TEST_CURL_BODY='{"errors":"Sorry, you are missing some required attributes","required_attributes":["requester_email"]}' \
     run_notify "$case_dir" --tier urgent "hello" 2>&1)
   rc=$?
   set -e
 
-  expect_code 1 "$rc" "non-2xx: a non-2xx Pushover response should be refused"
-  assert_contains "$out" "HTTP 400" "non-2xx: refusal did not include the HTTP status"
-  assert_contains "$out" "message parameter is required" "non-2xx: refusal did not print Pushover's errors array"
-  pass "fm-notify-captain prints Pushover's errors array on a non-2xx response"
+  expect_code 1 "$rc" "non-2xx: a non-2xx Better Stack response should be refused"
+  assert_contains "$out" "HTTP 422" "non-2xx: refusal did not include the HTTP status"
+  assert_contains "$out" "missing some required attributes" "non-2xx: refusal did not print Better Stack's errors"
+  pass "fm-notify-captain prints Better Stack's errors on a non-2xx response"
 }
 
-test_success_emergency_prints_receipt_and_never_leaks_secrets_to_argv() {
-  local case_dir out rc argv_log stdin_log
+test_accepted_page_without_incident_id_fails_loud() {
+  local case_dir out rc
+  case_dir=$(new_case no-incident-id)
+  write_op_mock "$case_dir/fakebin"
+  write_curl_mock "$case_dir/fakebin"
+
+  set +e
+  out=$(FM_TEST_CURL_HTTP_CODE=201 FM_TEST_CURL_BODY='{"data":{"type":"incident"}}' \
+    run_notify "$case_dir" --tier urgent "hello" 2>&1)
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "no-incident-id: a 2xx with no incident id should be refused"
+  assert_contains "$out" "no incident id" "no-incident-id: refusal did not explain the missing incident id"
+  pass "fm-notify-captain refuses a page it could never resolve afterwards"
+}
+
+test_success_emergency_body_and_no_token_in_argv() {
+  local case_dir out argv_log stdin_log body
   case_dir=$(new_case success-emergency)
   write_op_mock "$case_dir/fakebin"
   write_curl_mock "$case_dir/fakebin"
   argv_log="$case_dir/curl-argv.log"
   stdin_log="$case_dir/curl-stdin.log"
 
-  out=$(FM_TEST_CURL_HTTP_CODE=200 \
-    FM_TEST_CURL_BODY='{"status":1,"request":"req-123","receipt":"recv-456"}' \
-    FM_TEST_OP_USERNAME='u-fake-user-key' FM_TEST_OP_CREDENTIAL='t-fake-app-token' \
+  out=$(FM_TEST_CURL_HTTP_CODE=201 \
+    FM_TEST_CURL_BODY='{"data":{"id":"993937396","type":"incident"}}' \
+    FM_TEST_OP_USERNAME='oncall@example.com' FM_TEST_OP_CREDENTIAL='t-fake-api-token' \
     FM_TEST_CURL_ARGV_LOG="$argv_log" FM_TEST_CURL_STDIN_LOG="$stdin_log" \
     run_notify "$case_dir" --tier emergency --title "Prod down" "everything is on fire" 2>&1) \
     || fail "success-emergency: fm-notify-captain should succeed"
 
-  assert_contains "$out" "sent: tier=emergency priority=2" "success-emergency: missing sent confirmation"
-  assert_contains "$out" "receipt: recv-456" "success-emergency: emergency send did not print the receipt id"
-  assert_no_grep 'u-fake-user-key' "$argv_log" "success-emergency: the user key leaked into curl's argv"
-  assert_no_grep 't-fake-app-token' "$argv_log" "success-emergency: the app token leaked into curl's argv"
-  assert_grep 'user=u-fake-user-key' "$stdin_log" "success-emergency: user key was not sent in the POST body"
-  assert_grep 'token=t-fake-app-token' "$stdin_log" "success-emergency: app token was not sent in the POST body"
-  assert_grep 'retry=30' "$stdin_log" "success-emergency: emergency POST body missing retry"
-  assert_grep 'expire=3600' "$stdin_log" "success-emergency: emergency POST body missing expire"
-  pass "fm-notify-captain prints the receipt id on an emergency send and never puts secrets in curl argv"
+  assert_contains "$out" "paged: tier=emergency incident=993937396" "success-emergency: missing paged confirmation"
+  assert_contains "$out" "--resolve 993937396" "success-emergency: did not print how to resolve the incident"
+  assert_no_grep 't-fake-api-token' "$argv_log" "success-emergency: the API token leaked into curl's argv"
+  assert_grep 'authorization: Bearer t-fake-api-token' "$stdin_log" "success-emergency: the API token was not passed through curl's stdin config"
+
+  body=$(body_from_config "$stdin_log")
+  [ "$(printf '%s' "$body" | jq -r '.name')" = "Prod down" ] \
+    || fail "success-emergency: the incident body did not carry --title as name (got: $body)"
+  [ "$(printf '%s' "$body" | jq -r '.summary')" = "everything is on fire" ] \
+    || fail "success-emergency: the incident body did not carry the message as summary"
+  [ "$(printf '%s' "$body" | jq -r '.requester_email')" = "oncall@example.com" ] \
+    || fail "success-emergency: the incident body did not carry the requester email"
+  [ "$(printf '%s' "$body" | jq -r '.push, .critical_alert, .call, .team_wait' | tr '\n' ' ')" = "true true true 300 " ] \
+    || fail "success-emergency: emergency tier did not send a critical push plus a call and team escalation (got: $body)"
+  pass "fm-notify-captain sends the emergency incident body and keeps the API token out of curl's argv"
 }
 
-test_success_urgent_no_receipt_line() {
-  local case_dir out rc
+test_success_urgent_differs_from_emergency() {
+  local case_dir out stdin_log body
   case_dir=$(new_case success-urgent)
   write_op_mock "$case_dir/fakebin"
   write_curl_mock "$case_dir/fakebin"
+  stdin_log="$case_dir/curl-stdin.log"
 
-  out=$(FM_TEST_CURL_HTTP_CODE=200 \
-    FM_TEST_CURL_BODY='{"status":1,"request":"req-789"}' \
+  out=$(FM_TEST_CURL_HTTP_CODE=201 \
+    FM_TEST_CURL_BODY='{"data":{"id":"993937400","type":"incident"}}' \
+    FM_TEST_CURL_STDIN_LOG="$stdin_log" \
     run_notify "$case_dir" --tier urgent "a routine urgent ping" 2>&1) \
     || fail "success-urgent: fm-notify-captain should succeed"
 
-  assert_contains "$out" "sent: tier=urgent priority=1" "success-urgent: missing sent confirmation"
-  assert_not_contains "$out" "receipt:" "success-urgent: urgent (priority 1) send should not print a receipt line"
-  pass "fm-notify-captain does not print a receipt line for a priority-1 urgent send"
+  assert_contains "$out" "paged: tier=urgent incident=993937400" "success-urgent: missing paged confirmation"
+
+  body=$(body_from_config "$stdin_log")
+  [ "$(printf '%s' "$body" | jq -r '.push, .critical_alert, .call' | tr '\n' ' ')" = "true true false " ] \
+    || fail "success-urgent: urgent tier did not send a critical push without a call (got: $body)"
+  [ "$(printf '%s' "$body" | jq -r 'has("team_wait")')" = "false" ] \
+    || fail "success-urgent: urgent tier should not escalate to the whole team (got: $body)"
+  # An incident with no name reaches the phone titled "API request", so the
+  # default title matters as much as an explicit one.
+  [ "$(printf '%s' "$body" | jq -r '.name')" = "Firstmate urgent" ] \
+    || fail "success-urgent: urgent tier sent no default incident name (got: $body)"
+  pass "fm-notify-captain sends a quieter incident for the urgent tier, still titled"
 }
 
-test_dry_run_urgent_maps_to_priority_1
-test_dry_run_emergency_maps_to_priority_2_with_defaults
-test_dry_run_respects_retry_expire_env_overrides
-test_retry_below_minimum_rejected
-test_expire_above_maximum_rejected
-test_non_numeric_retry_rejected
+test_resolve_closes_the_incident() {
+  local case_dir out stdin_log
+  case_dir=$(new_case resolve-success)
+  write_op_mock "$case_dir/fakebin"
+  write_curl_mock "$case_dir/fakebin"
+  stdin_log="$case_dir/curl-stdin.log"
+
+  # __MISSING__ requester email: resolving needs no requester, so it must not
+  # fail on a field only a new page reads.
+  out=$(FM_TEST_CURL_HTTP_CODE=200 FM_TEST_CURL_BODY='{}' \
+    FM_TEST_OP_USERNAME=__MISSING__ \
+    FM_TEST_CURL_STDIN_LOG="$stdin_log" \
+    run_notify "$case_dir" --resolve 993937396 2>&1) \
+    || fail "resolve-success: fm-notify-captain --resolve should succeed"
+
+  assert_contains "$out" "resolved: incident=993937396" "resolve-success: missing resolved confirmation"
+  assert_grep 'incidents/993937396/resolve' "$stdin_log" "resolve-success: did not POST to the incident's resolve endpoint"
+  pass "fm-notify-captain --resolve closes an open incident without needing a requester email"
+}
+
+test_dry_run_urgent_is_a_critical_push_without_a_call
+test_dry_run_emergency_adds_a_call_and_team_escalation
+test_dry_run_respects_team_wait_override
+test_non_numeric_team_wait_rejected
+test_zero_team_wait_rejected
+test_dry_run_titles_the_page_when_no_title_is_given
 test_dry_run_sends_nothing
 test_missing_tier_fails_loud
 test_invalid_tier_fails_loud
 test_missing_message_fails_loud
+test_non_numeric_resolve_id_fails_loud
+test_resolve_with_tier_fails_loud
 test_missing_op_service_account_token_fails_loud
 test_op_binary_absent_fails_loud
 test_missing_credential_field_names_it
 test_missing_username_field_names_it
 test_empty_field_fails_loud
-test_non_2xx_response_prints_errors_array
-test_success_emergency_prints_receipt_and_never_leaks_secrets_to_argv
-test_success_urgent_no_receipt_line
+test_non_2xx_response_prints_errors
+test_accepted_page_without_incident_id_fails_loud
+test_success_emergency_body_and_no_token_in_argv
+test_success_urgent_differs_from_emergency
+test_resolve_closes_the_incident
