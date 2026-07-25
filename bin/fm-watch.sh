@@ -554,6 +554,35 @@ heartbeat_scan_finds_actionable() {
   return 1
 }
 
+# Every long block below runs as a background child that this shell `wait`s on,
+# never as a foreground command. Bash defers a trap until the running FOREGROUND
+# command returns, so a plain `sleep POLL` would leave this watcher deaf to
+# HUP/TERM for a whole interval, while the `wait` builtin is interrupted by a
+# trapped signal and runs the handler at once. FM_WATCH_WAIT_PID lets the exit
+# path reap the child a signal left behind.
+FM_WATCH_WAIT_PID=
+
+interruptible_sleep() {  # <seconds>
+  sleep "$1" &
+  FM_WATCH_WAIT_PID=$!
+  wait "$FM_WATCH_WAIT_PID" 2>/dev/null || true
+  FM_WATCH_WAIT_PID=
+}
+
+fm_watch_wait_cleanup() {
+  [ -n "$FM_WATCH_WAIT_PID" ] || return 0
+  kill -TERM "$FM_WATCH_WAIT_PID" 2>/dev/null || true
+  FM_WATCH_WAIT_PID=
+}
+
+# Holds the event-wait capture file only while it exists, so a signal landing
+# mid-wait cannot leave it behind in the state dir.
+FM_EVENT_WAIT_FILE=
+fm_event_wait_capture_cleanup() {
+  [ -z "$FM_EVENT_WAIT_FILE" ] || rm -f -- "$FM_EVENT_WAIT_FILE"
+  FM_EVENT_WAIT_FILE=
+}
+
 # event_wait_or_sleep: the terminal wait of each supervision cycle. For a home
 # with push-capable windows (herdr), it replaces the blind `sleep POLL` with a
 # bounded wait on the backend's native transition stream, so a crew going
@@ -566,7 +595,7 @@ heartbeat_scan_finds_actionable() {
 # supervision cycle: the reader is a short-lived subprocess of THIS watcher, not
 # a second watcher, so every guard/beacon/arm/turn-end mechanism is unchanged.
 event_wait_or_sleep() {
-  local w b session first_backend="" first_session="" rec rc
+  local w b session first_backend="" first_session="" rec rc rec_file
   local windows=()
   while IFS= read -r w; do
     b=$(window_backend "$w")
@@ -588,7 +617,7 @@ event_wait_or_sleep() {
   done < <(recorded_windows)
 
   if [ "${#windows[@]}" -eq 0 ]; then
-    sleep "$POLL"
+    interruptible_sleep "$POLL"
     return
   fi
 
@@ -604,12 +633,24 @@ event_wait_or_sleep() {
     _event_cap_fails=0
   fi
   if [ "$_event_cap_ok" != 1 ]; then
-    sleep "$POLL"
+    interruptible_sleep "$POLL"
     return
   fi
 
-  rec=$(FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED=1 fm_backend_wait_transition "$first_backend" "$first_session" "$POLL" "$STATE" "${windows[@]}")
+  # Same reason as interruptible_sleep: a command substitution is a foreground
+  # command, so capturing the bounded event wait directly would defer the signal
+  # traps for the whole budget. The wait's only side effects are its stdout
+  # record, its exit status, and its own dedupe-marker files, all of which
+  # survive running it as a background child.
+  rec_file=$(mktemp "$STATE/.fm-event-wait.XXXXXX") || { interruptible_sleep "$POLL"; return; }
+  FM_EVENT_WAIT_FILE=$rec_file
+  FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED=1 fm_backend_wait_transition "$first_backend" "$first_session" "$POLL" "$STATE" "${windows[@]}" > "$rec_file" &
+  FM_WATCH_WAIT_PID=$!
+  wait "$FM_WATCH_WAIT_PID"
   rc=$?
+  FM_WATCH_WAIT_PID=
+  rec=$(cat "$rec_file" 2>/dev/null || true)
+  fm_event_wait_capture_cleanup
   case "$rc" in
     0)
       _event_cap_fails=0
@@ -621,7 +662,7 @@ event_wait_or_sleep() {
       # pure polling for the rest of this watcher process.
       _event_cap_fails=$((_event_cap_fails + 1))
       [ "$_event_cap_fails" -ge "$EVENT_CAP_FAIL_MAX" ] && _event_cap_ok=0
-      sleep "$POLL"
+      interruptible_sleep "$POLL"
       ;;
     *)
       # 1: a clean full-budget wait with no actionable edge - the reader already
@@ -682,8 +723,10 @@ if ! fm_lock_try_acquire "$WATCH_LOCK" fm_watch_write_identity; then
   exit 0
 fi
 watcher_cleanup() {
+  fm_watch_wait_cleanup
   fm_active_check_stop || return 1
   fm_check_output_cleanup
+  fm_event_wait_capture_cleanup
   fm_custom_check_snapshot_cleanup
   fm_lock_release "$WATCH_LOCK"
 }
@@ -810,7 +853,7 @@ while :; do
   # signature for an already-pending file (last write wins below).
   pending=$(scan_signals)
   if [ -n "$pending" ]; then
-    sleep "$SIGNAL_GRACE"
+    interruptible_sleep "$SIGNAL_GRACE"
     pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
     files=""
     while IFS=$(printf '\t') read -r sf sig f; do

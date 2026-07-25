@@ -34,7 +34,8 @@ sleep() { printf 'SLEEP\n' >> "$SLEEP_LOG"; }
 reset_state() {
   rm -f "$STATE_DIR"/*.meta "$STATE_DIR"/*.status "$STATE_DIR"/.wake-queue \
     "$STATE_DIR"/.wake-queue.seq "$STATE_DIR"/.watch-triage.log \
-    "$STATE_DIR"/.herdr-escalated-* "$TMP"/panes "$TMP"/wtcalls "$TMP"/wtcalled 2>/dev/null || true
+    "$STATE_DIR"/.herdr-escalated-* "$TMP"/panes "$TMP"/wtcalls "$TMP"/wtcalled \
+    "$TMP"/capconfirmed 2>/dev/null || true
   : > "$WAKE_LOG"
   : > "$SLEEP_LOG"
   _event_cap_key=""
@@ -102,14 +103,19 @@ fm_write_meta "$STATE_DIR/tk3.meta" "window=default:wG:pQ" "backend=herdr" "kind
 CAP_CALLS=0
 # shellcheck disable=SC2329 # Runtime overrides called by the isolated watcher.
 fm_backend_events_capable() { CAP_CALLS=$((CAP_CALLS + 1)); return 0; }
+# The bounded wait runs as a background child so signals stay deliverable, so it
+# must record what it saw for the parent to assert; a `fail` inside it would only
+# exit that child.
 # shellcheck disable=SC2329 # Runtime overrides called by the isolated watcher.
 fm_backend_wait_transition() {
-  [ "${FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED:-0}" = 1 ] || fail "cached capability verdict was not passed to the wait"
+  printf '%s\n' "${FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED:-0}" >> "$TMP/capconfirmed"
   return 1
 }
 event_wait_or_sleep
 event_wait_or_sleep
 [ "$CAP_CALLS" = 1 ] || fail "capability probe must be memoized across waits, got $CAP_CALLS calls"
+[ -s "$TMP/capconfirmed" ] || fail "the bounded wait was never invoked"
+grep -qxv 1 "$TMP/capconfirmed" && fail "cached capability verdict was not passed to the wait: $(cat "$TMP/capconfirmed")"
 pass "event_wait_or_sleep: one cached capability probe owns validation across bounded waits"
 
 # --- event_wait_or_sleep: a tmux-only home never runs the event path ----------
