@@ -851,6 +851,43 @@ test_arm_hup_cleans_child_and_temp_output() {
   pass "arm cleans child watcher and temp output on HUP"
 }
 
+# Signal release must not scale with the poll interval. Bash defers a trap until
+# the running foreground command returns, so a watcher that blocks in a plain
+# `sleep POLL` stays deaf for a whole interval - long enough that
+# `fm-watch-arm.sh --restart` gives up mid-teardown and leaves supervision with
+# no watcher at all. The interval here is deliberately far above the exit
+# budget: a deferred teardown cannot fit inside it no matter how idle the host,
+# and a prompt one has seconds of slack no matter how loaded it is.
+test_arm_hup_release_does_not_scale_with_the_poll_interval() {
+  local dir state fakebin armout i armpid lock_pid status
+  dir=$(make_case arm-hup-release-latency)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=120 FM_SIGNAL_GRACE=120 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF 'watcher: started pid=' "$armout" || fail "arm did not start before HUP latency check"
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  kill -HUP "$armpid" 2>/dev/null || fail "could not send HUP to arm"
+  wait_for_exit "$armpid" 100
+  status=$?
+  [ "$status" -ne 124 ] || fail "arm stayed deaf to HUP for >10s with a 120s poll interval (signal release is deferred by the poll sleep)"
+  [ "$status" -eq 129 ] || fail "arm did not exit with HUP status (got $status)"
+  i=0
+  while [ "$i" -lt 100 ] && is_live_non_zombie "$lock_pid"; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  ! is_live_non_zombie "$lock_pid" || fail "watcher child stayed alive >10s after HUP with a 120s poll interval"
+  pass "arm and its watcher release on HUP promptly regardless of how long the poll interval is"
+}
+
 test_arm_propagates_immediate_wake_before_confirmation() {
   local dir state fakebin armout drain_out check_file rc
   dir=$(make_case arm-immediate-wake)
@@ -1145,6 +1182,7 @@ test_arm_attaches_and_waits_for_live_fresh_watcher
 test_attached_arm_signal_is_recorded_in_cycle_ledger
 test_arm_starts_and_self_heals
 test_arm_hup_cleans_child_and_temp_output
+test_arm_hup_release_does_not_scale_with_the_poll_interval
 test_arm_propagates_immediate_wake_before_confirmation
 test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
