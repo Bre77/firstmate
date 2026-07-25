@@ -822,12 +822,13 @@ test_arm_starts_and_self_heals() {
 }
 
 test_arm_hup_cleans_child_and_temp_output() {
-  local dir state fakebin armout i armpid lock_pid status
+  local dir state fakebin armout armerr i armpid lock_pid status handler
   dir=$(make_case arm-hup-cleanup)
   state="$dir/state"
   fakebin="$dir/fakebin"
   armout="$dir/arm.out"
-  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  armerr="$dir/arm.err"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "${FM_DEFAULT_SIGNALS[@]}" "$WATCH_ARM" > "$armout" 2> "$armerr" &
   armpid=$!
   i=0
   while [ "$i" -lt 80 ]; do
@@ -837,10 +838,22 @@ test_arm_hup_cleans_child_and_temp_output() {
   done
   grep -qF 'watcher: started pid=' "$armout" || fail "arm did not start before HUP cleanup check"
   lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  signal_handler_installed "$armpid" 1
+  handler=$?
+  [ "$handler" -ne 1 ] || fail "arm installed no HUP handler, so nothing below can be measured: $(cat "$armerr")"
   kill -HUP "$armpid" 2>/dev/null || fail "could not send HUP to arm"
   wait_for_exit "$armpid" 80
   status=$?
+  # A trap body that fails to parse installs nothing at all, so name that first:
+  # it otherwise reaches the assertions below as either an unexplained timeout
+  # (the watcher never sees its TERM) or as the very 128+HUP the handler would
+  # have exited with anyway (the interrupted wait returns it unaided), and only
+  # the ledger record the handler itself writes can tell those apart.
+  ! grep -qE 'trap: line|unexpected EOF|syntax error' "$armerr" \
+    || fail "arm or its watcher could not install a signal handler: $(cat "$armerr")"
   [ "$status" -eq 129 ] || fail "arm did not exit with HUP status (got $status)"
+  grep -q 'signal=HUP.*reason=arm-interrupted' "$state/.watch-cycle-exits.log" 2>/dev/null \
+    || fail "HUP handler did not run (ledger: $(cat "$state/.watch-cycle-exits.log" 2>/dev/null))"
   i=0
   while [ "$i" -lt 80 ] && is_live_non_zombie "$lock_pid"; do
     sleep 0.1
@@ -859,12 +872,12 @@ test_arm_hup_cleans_child_and_temp_output() {
 # budget: a deferred teardown cannot fit inside it no matter how idle the host,
 # and a prompt one has seconds of slack no matter how loaded it is.
 test_arm_hup_release_does_not_scale_with_the_poll_interval() {
-  local dir state fakebin armout i armpid lock_pid status
+  local dir state fakebin armout i armpid lock_pid status handler
   dir=$(make_case arm-hup-release-latency)
   state="$dir/state"
   fakebin="$dir/fakebin"
   armout="$dir/arm.out"
-  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=120 FM_SIGNAL_GRACE=120 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=120 FM_SIGNAL_GRACE=120 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "${FM_DEFAULT_SIGNALS[@]}" "$WATCH_ARM" > "$armout" &
   armpid=$!
   i=0
   while [ "$i" -lt 80 ]; do
@@ -874,6 +887,9 @@ test_arm_hup_release_does_not_scale_with_the_poll_interval() {
   done
   grep -qF 'watcher: started pid=' "$armout" || fail "arm did not start before HUP latency check"
   lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  signal_handler_installed "$armpid" 1
+  handler=$?
+  [ "$handler" -ne 1 ] || fail "arm installed no HUP handler, so release latency cannot be measured"
   kill -HUP "$armpid" 2>/dev/null || fail "could not send HUP to arm"
   wait_for_exit "$armpid" 100
   status=$?
@@ -1019,7 +1035,7 @@ SH
 
   rm -f "$check_file" "$state/task.check-trust"
   armout="$dir/successor-arm.out"
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WATCH_PREDECESSOR_ARM_PID="$first_arm" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WATCH_PREDECESSOR_ARM_PID="$first_arm" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "${FM_DEFAULT_SIGNALS[@]}" "$WATCH_ARM" > "$armout" &
   successor_arm=$!
   i=0
   while [ "$i" -lt 80 ]; do
@@ -1039,7 +1055,7 @@ SH
   iteration=0
   while [ "$iteration" -lt 6 ]; do
     armout="$dir/bounded-$iteration.out"
-    PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WATCH_CYCLE_LOG_MAX_BYTES=1400 FM_WATCH_CYCLE_LOG_KEEP_LINES=2 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+    PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WATCH_CYCLE_LOG_MAX_BYTES=1400 FM_WATCH_CYCLE_LOG_KEEP_LINES=2 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "${FM_DEFAULT_SIGNALS[@]}" "$WATCH_ARM" > "$armout" &
     successor_arm=$!
     i=0
     while [ "$i" -lt 80 ]; do

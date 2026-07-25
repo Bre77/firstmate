@@ -48,6 +48,38 @@ REC
 chmod +x "$_fm_wedge_rec_dir/rec"
 export FM_WEDGE_ALARM_EXEC="$_fm_wedge_rec_dir/rec"
 
+# Command prefix that restores SIGHUP's default disposition for the process it
+# launches. `nohup`, and most detached launchers an agent or CI wrapper uses,
+# leave SIGHUP ignored; that disposition is inherited through fork and exec, and
+# bash cannot trap or reset a signal that was ignored on entry. A HUP assertion
+# spawned without this prefix therefore measures the launcher, not the code under
+# test: the handler is never installed, `kill -HUP` is discarded by the kernel,
+# and the case fails on its deadline with no indication why. The prefix is a
+# no-op wherever SIGHUP already carries its default disposition.
+# shellcheck disable=SC2034 # Read by the suites that source this harness.
+FM_DEFAULT_SIGNALS=(env)
+if env --default-signal=HUP true >/dev/null 2>&1; then
+  # shellcheck disable=SC2034 # Read by the suites that source this harness.
+  FM_DEFAULT_SIGNALS=(env --default-signal=HUP)
+elif command -v perl >/dev/null 2>&1; then
+  # shellcheck disable=SC2016,SC2034 # Perl source, read by the suites that source this harness.
+  FM_DEFAULT_SIGNALS=(perl -e '$SIG{HUP} = "DEFAULT"; exec { $ARGV[0] } @ARGV or die "exec: $!"')
+fi
+
+# signal_handler_installed <pid> <signal-number>: 0 when that process has a
+# handler installed for the signal, 1 when it has none, and 2 where the platform
+# does not expose the kernel's caught-signal mask. Assert this before signaling,
+# because a handler that was never installed - an unparseable trap body, or a
+# disposition the launcher left ignored - is otherwise indistinguishable from the
+# code ignoring the signal, and surfaces only as an unexplained timeout.
+signal_handler_installed() {
+  local pid=$1 signum=$2 caught
+  [ -r "/proc/$pid/status" ] || return 2
+  caught=$(awk '/^SigCgt:/ { print $2; exit }' "/proc/$pid/status" 2>/dev/null)
+  [ -n "$caught" ] || return 2
+  [ $(( (0x$caught >> (signum - 1)) & 1 )) -eq 1 ]
+}
+
 # append_wake <state> <kind> <key> <payload>: append a wake record to the durable
 # queue in a subshell scoped to <state>, using the production wake library.
 append_wake() {
