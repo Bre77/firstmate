@@ -1,38 +1,54 @@
 #!/usr/bin/env bash
-# Send an urgent/emergency push notification to the captain's phone via
-# Pushover - the "last hop" channel from the captain-alert-channel-b3
-# investigation (fork-only firstmate feature; never upstreamed).
+# Page the captain's phone through Better Stack on-call - the "last hop"
+# channel from the captain-alert-channel-b3 investigation (fork-only firstmate
+# feature; never upstreamed).
 #
-# Tier maps straight to Pushover priority:
-#   urgent    -> priority 1 (bypasses quiet hours, sounds once)
-#   emergency -> priority 2 (Pushover re-sends every `retry` seconds, up to
-#                `expire` seconds total, until acknowledged in the Pushover app)
+# Each page opens a Better Stack incident, which stays open until it is
+# acknowledged in the app or resolved. A caller that pages must resolve once
+# the emergency is over, so every send prints the incident id and
+# `--resolve <id>` closes it.
 #
-# Secrets (the Pushover user key and application token) are read from
-# 1Password at call time and never touch disk, stdout, or stderr, and never
-# appear in curl's argv: they live only in shell variables and are sent to
-# curl over stdin (--data @-), so `ps` never shows them. Reads item
-# "Pushover" in vault "CLI": field "username" for the user key, field
-# "credential" for the application token. Requires OP_SERVICE_ACCOUNT_TOKEN in
-# the environment so `op` can authenticate non-interactively (source it from
-# your shell profile per existing fleet practice).
+# Tier maps to the incident's notification channels:
+#   urgent    -> critical push notification, which ignores the phone's mute
+#                switch and Do Not Disturb; no phone call
+#   emergency -> the same critical push plus a phone call to the on-call
+#                number, plus escalation to the whole on-call team if nobody
+#                acknowledges within FM_NOTIFY_TEAM_WAIT seconds
 #
-# On a priority-2 (emergency) send, prints Pushover's receipt id so a caller
-# can later poll it via the receipts API (https://pushover.net/api/receipts) -
-# this script does not poll receipts itself.
+# Better Stack has no per-incident repeat control: an unbounded
+# repeat-until-acknowledged cadence lives on an escalation policy
+# (repeat_count/repeat_delay), not on the incident payload, and this account
+# has no escalation policy. The emergency tier therefore escalates once,
+# loudly, rather than forever.
+#
+# The title must be sent as the incident's `name`. Better Stack titles an
+# incident that has no `name` "API request", identically for every page, so
+# `name` is always populated - from --title, or from a tier-derived default.
+#
+# Secrets (the Better Stack API token) and the requester email the incidents
+# API requires are read from 1Password at call time and never touch disk,
+# stdout, or stderr, and never appear in curl's argv: they live only in shell
+# variables and reach curl through a config file on stdin (--config -), so
+# `ps` never shows them. Reads item "BetterStack API Token" in vault "CLI":
+# field "username" for the requester email, field "credential" for the API
+# token. Requires OP_SERVICE_ACCOUNT_TOKEN in the environment so `op` can
+# authenticate non-interactively (source it from your shell profile per
+# existing fleet practice).
 #
 # Usage:
 #   fm-notify-captain.sh --tier <urgent|emergency> [--title <text>] [--dry-run] <message>
+#   fm-notify-captain.sh --resolve <incident-id>
 #
 # Env overrides (emergency tier only):
-#   FM_NOTIFY_RETRY   seconds between re-alerts, >= 30 (default 30)
-#   FM_NOTIFY_EXPIRE  seconds until Pushover stops re-alerting, <= 10800 (default 3600)
+#   FM_NOTIFY_TEAM_WAIT  seconds before an unacknowledged incident escalates
+#                        to the entire on-call team (default 300)
 #
 # Requires: op, curl, jq on PATH.
 set -eu
 
-PUSHOVER_URL="https://api.pushover.net/1/messages.json"
-OP_ITEM="Pushover"
+API_BASE="https://uptime.betterstack.com"
+INCIDENTS_PATH="/api/v3/incidents"
+OP_ITEM="BetterStack API Token"
 OP_VAULT="CLI"
 
 usage() {
@@ -41,12 +57,14 @@ usage() {
 
 TIER=""
 TITLE=""
+RESOLVE_ID=""
 DRY_RUN=false
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --tier) TIER=${2:?--tier needs a value}; shift 2 ;;
     --title) TITLE=${2:?--title needs a value}; shift 2 ;;
+    --resolve) RESOLVE_ID=${2:?--resolve needs an incident id}; shift 2 ;;
     --dry-run) DRY_RUN=true; shift ;;
     -h|--help) usage; exit 0 ;;
     --) shift; break ;;
@@ -55,56 +73,49 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-[ $# -gt 0 ] || { echo "error: message is required" >&2; usage; exit 1; }
-MESSAGE="$*"
-
-case "$TIER" in
-  urgent) PRIORITY=1 ;;
-  emergency) PRIORITY=2 ;;
-  "") echo "error: --tier is required (urgent|emergency)" >&2; usage; exit 1 ;;
-  *) echo "error: --tier must be 'urgent' or 'emergency' (got: $TIER)" >&2; usage; exit 1 ;;
-esac
-
-RETRY=${FM_NOTIFY_RETRY:-30}
-EXPIRE=${FM_NOTIFY_EXPIRE:-3600}
-
-if [ "$PRIORITY" -eq 2 ]; then
-  case "$RETRY" in
-    ''|*[!0-9]*) echo "error: FM_NOTIFY_RETRY must be a positive integer (got: $RETRY)" >&2; exit 1 ;;
+if [ -n "$RESOLVE_ID" ]; then
+  [ -z "$TIER" ] || { echo "error: --resolve cannot be combined with --tier" >&2; usage; exit 1; }
+  [ $# -eq 0 ] || { echo "error: --resolve takes no message argument" >&2; usage; exit 1; }
+  case "$RESOLVE_ID" in
+    ''|*[!0-9]*) echo "error: --resolve needs a numeric Better Stack incident id (got: $RESOLVE_ID)" >&2; exit 1 ;;
   esac
-  case "$EXPIRE" in
-    ''|*[!0-9]*) echo "error: FM_NOTIFY_EXPIRE must be a positive integer (got: $EXPIRE)" >&2; exit 1 ;;
+else
+  [ $# -gt 0 ] || { echo "error: message is required" >&2; usage; exit 1; }
+  MESSAGE="$*"
+
+  case "$TIER" in
+    urgent) CALL=false ;;
+    emergency) CALL=true ;;
+    "") echo "error: --tier is required (urgent|emergency)" >&2; usage; exit 1 ;;
+    *) echo "error: --tier must be 'urgent' or 'emergency' (got: $TIER)" >&2; usage; exit 1 ;;
   esac
-  [ "$RETRY" -ge 30 ] || { echo "error: FM_NOTIFY_RETRY must be >= 30 seconds per Pushover's API (got: $RETRY)" >&2; exit 1; }
-  [ "$EXPIRE" -le 10800 ] || { echo "error: FM_NOTIFY_EXPIRE must be <= 10800 seconds (3h) per Pushover's API (got: $EXPIRE)" >&2; exit 1; }
+
+  # Never empty: an incident with no name reaches the phone titled "API request".
+  [ -n "$TITLE" ] || TITLE="Firstmate $TIER"
+
+  TEAM_WAIT=${FM_NOTIFY_TEAM_WAIT:-300}
+  if [ "$TIER" = emergency ]; then
+    case "$TEAM_WAIT" in
+      ''|*[!0-9]*) echo "error: FM_NOTIFY_TEAM_WAIT must be a positive integer (got: $TEAM_WAIT)" >&2; exit 1 ;;
+    esac
+    [ "$TEAM_WAIT" -gt 0 ] || { echo "error: FM_NOTIFY_TEAM_WAIT must be a positive integer (got: $TEAM_WAIT)" >&2; exit 1; }
+  fi
 fi
 
-# Percent-encode one form value. LC_ALL=C makes bash index by byte, so
-# multi-byte UTF-8 characters are correctly split and escaped byte-by-byte.
-urlencode() {
-  local LC_ALL=C
-  local string=$1 strlen pos c o encoded=""
-  strlen=${#string}
-  for (( pos = 0; pos < strlen; pos++ )); do
-    c=${string:pos:1}
-    case "$c" in
-      [-_.~a-zA-Z0-9]) o=$c ;;
-      *) printf -v o '%%%02x' "'$c" ;;
-    esac
-    encoded+=$o
-  done
-  printf '%s' "$encoded"
-}
-
 if "$DRY_RUN"; then
-  echo "dry-run: would POST to $PUSHOVER_URL"
-  echo "  tier=$TIER priority=$PRIORITY"
-  if [ "$PRIORITY" -eq 2 ]; then
-    echo "  retry=$RETRY expire=$EXPIRE"
+  if [ -n "$RESOLVE_ID" ]; then
+    echo "dry-run: would POST to $API_BASE$INCIDENTS_PATH/$RESOLVE_ID/resolve"
+    echo "  token=<REDACTED>"
+  else
+    echo "dry-run: would POST to $API_BASE$INCIDENTS_PATH"
+    echo "  tier=$TIER push=true critical_alert=true call=$CALL"
+    if [ "$TIER" = emergency ]; then
+      echo "  team_wait=$TEAM_WAIT"
+    fi
+    echo "  title=$TITLE"
+    echo "  message=$MESSAGE"
+    echo "  requester_email=<REDACTED> token=<REDACTED>"
   fi
-  echo "  title=${TITLE:-<pushover app default>}"
-  echo "  message=$MESSAGE"
-  echo "  user=<REDACTED> token=<REDACTED>"
   exit 0
 fi
 
@@ -136,38 +147,92 @@ fetch_field() {
   printf '%s' "$out"
 }
 
-USER_KEY=$(fetch_field username)
-APP_TOKEN=$(fetch_field credential)
-
-BODY="user=$(urlencode "$USER_KEY")&token=$(urlencode "$APP_TOKEN")&message=$(urlencode "$MESSAGE")&priority=$PRIORITY"
-if [ -n "$TITLE" ]; then
-  BODY="$BODY&title=$(urlencode "$TITLE")"
+# Resolving an incident needs no requester, so do not make it fail on a field
+# only a new page reads.
+if [ -z "$RESOLVE_ID" ]; then
+  REQUESTER_EMAIL=$(fetch_field username)
 fi
-if [ "$PRIORITY" -eq 2 ]; then
-  BODY="$BODY&retry=$RETRY&expire=$EXPIRE"
-fi
+API_TOKEN=$(fetch_field credential)
 
 RESP_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-notify-captain-resp.XXXXXX")
 trap 'rm -f "$RESP_FILE"' EXIT
 
-HTTP_CODE=$(printf '%s' "$BODY" | curl -sS --max-time 15 -o "$RESP_FILE" -w '%{http_code}' --data @- "$PUSHOVER_URL") || {
-  echo "error: curl failed to reach the Pushover API" >&2
+# Escape a value for a curl config file's quoted-string syntax.
+config_escape() {
+  local value=${1//\\/\\\\}
+  printf '%s' "${value//\"/\\\"}"
+}
+
+# POST <path> <json-body>, printing curl's HTTP status code. The token and the
+# body travel in a config file on stdin, so neither reaches curl's argv.
+api_post() {
+  local path=$1 body=$2
+  printf 'url = "%s%s"\nheader = "authorization: Bearer %s"\nheader = "content-type: application/json"\ndata-raw = "%s"\n' \
+    "$API_BASE" "$path" "$(config_escape "$API_TOKEN")" "$(config_escape "$body")" \
+    | curl -sS --max-time 15 -X POST -o "$RESP_FILE" -w '%{http_code}' --config -
+}
+
+# Print the API's own complaint for a failed call, without dumping a whole page.
+api_error_detail() {
+  local errors
+  errors=$(jq -c '.errors // empty' "$RESP_FILE" 2>/dev/null || true)
+  if [ -n "$errors" ]; then
+    printf ' errors=%s' "$errors"
+  else
+    printf ' body=%s' "$(tr -s '\n' ' ' < "$RESP_FILE" | cut -c1-300)"
+  fi
+}
+
+if [ -n "$RESOLVE_ID" ]; then
+  HTTP_CODE=$(api_post "$INCIDENTS_PATH/$RESOLVE_ID/resolve" '{}') || {
+    echo "error: curl failed to reach the Better Stack API" >&2
+    exit 1
+  }
+  case "$HTTP_CODE" in
+    2??) ;;
+    *) echo "error: Better Stack API returned HTTP $HTTP_CODE$(api_error_detail)" >&2; exit 1 ;;
+  esac
+  echo "resolved: incident=$RESOLVE_ID"
+  exit 0
+fi
+
+# jq -a keeps the body ASCII-only, so a multi-byte message cannot depend on the
+# config file's encoding.
+BODY=$(jq -acn \
+  --arg name "$TITLE" \
+  --arg summary "$MESSAGE" \
+  --arg requester "$REQUESTER_EMAIL" \
+  --arg tier "$TIER" \
+  --argjson call "$CALL" \
+  --argjson team_wait "$([ "$TIER" = emergency ] && printf '%s' "$TEAM_WAIT" || printf 'null')" \
+  '{
+     name: $name,
+     summary: $summary,
+     requester_email: $requester,
+     push: true,
+     critical_alert: true,
+     call: $call,
+     sms: false,
+     email: false,
+     metadata: {source: "firstmate", tier: $tier},
+   }
+   + (if $team_wait == null then {} else {team_wait: $team_wait} end)')
+
+HTTP_CODE=$(api_post "$INCIDENTS_PATH" "$BODY") || {
+  echo "error: curl failed to reach the Better Stack API" >&2
   exit 1
 }
 
 case "$HTTP_CODE" in
   2??) ;;
-  *)
-    ERRORS=$(jq -c '.errors // empty' "$RESP_FILE" 2>/dev/null || true)
-    echo "error: Pushover API returned HTTP $HTTP_CODE${ERRORS:+ errors=$ERRORS}" >&2
-    exit 1
-    ;;
+  *) echo "error: Better Stack API returned HTTP $HTTP_CODE$(api_error_detail)" >&2; exit 1 ;;
 esac
 
-echo "sent: tier=$TIER priority=$PRIORITY"
-if [ "$PRIORITY" -eq 2 ]; then
-  RECEIPT=$(jq -r '.receipt // empty' "$RESP_FILE")
-  if [ -n "$RECEIPT" ]; then
-    echo "receipt: $RECEIPT"
-  fi
+INCIDENT_ID=$(jq -r '.data.id // empty' "$RESP_FILE")
+if [ -z "$INCIDENT_ID" ]; then
+  echo "error: Better Stack accepted the page but returned no incident id, so it cannot be resolved later" >&2
+  exit 1
 fi
+
+echo "paged: tier=$TIER incident=$INCIDENT_ID"
+echo "resolve with: $(basename "${BASH_SOURCE[0]}") --resolve $INCIDENT_ID"
