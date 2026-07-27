@@ -419,6 +419,36 @@ EOF
   pass "snapshot includes durable scout reports after teardown"
 }
 
+test_oversized_backlog_survives_argv_limit() {
+  local home out out_summary backlog_bytes
+  home=$(make_home oversized-backlog)
+  {
+    printf '## Queued\n'
+    for i in $(seq 1 1500); do
+      printf -- '- handoff filler note %04d %s\n' "$i" \
+        "0123456789012345678901234567890123456789012345678901234567890123456789"
+    done
+  } > "$home/data/backlog.md"
+  # A single argv entry is capped at 131072 bytes (Linux MAX_ARG_STRLEN), and
+  # JSON-escaping this backlog roughly triples it, so this fixture must clear
+  # that bound to prove the fix survives it, not just work below it.
+  backlog_bytes=$(wc -c < "$home/data/backlog.md")
+  [ "$backlog_bytes" -gt 65536 ] \
+    || fail "fixture backlog.md too small to exercise the argv limit: $backlog_bytes bytes"
+  out=$(FM_HOME="$home" "$SNAPSHOT" --json) \
+    || fail "snapshot --json failed on an oversized backlog"
+  printf '%s' "$out" | jq -e --argjson min 131072 '
+    .schema == "fm-fleet-snapshot.v1"
+      and ((.backlog | tojson | length) > $min)
+  ' >/dev/null \
+    || fail "oversized-backlog snapshot missing schema or backlog JSON did not clear the argv-limit bound"
+  out_summary=$(FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary) \
+    || fail "snapshot --secondmate-home-summary failed on an oversized backlog"
+  printf '%s' "$out_summary" | jq -e '.generated != null' >/dev/null \
+    || fail "oversized-backlog secondmate-home-summary missing its generated field"
+  pass "both snapshot output modes complete past jq's argv-length limit on an oversized backlog"
+}
+
 test_backlog_tasks_axi_forms_and_overrides() {
   local home data projects fakebin out view
   home=$(make_home overrides)
@@ -767,6 +797,7 @@ test_open_decision_clears_on_keyed_resolution
 test_completed_scout_report_is_pointer_not_pending
 test_parked_scout_decision_stays_pending
 test_scout_reports_include_teardown_reports
+test_oversized_backlog_survives_argv_limit
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status
