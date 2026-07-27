@@ -608,6 +608,54 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+test_scheduled_wait_and_decision_key_wording() {
+  local home brief
+  home="$TMP_ROOT/scheduled-wait-home"
+  mkdir -p "$home/data"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-sched-ship firstmate >/dev/null 2>&1 \
+    || fail "fm-brief.sh ship scaffold exited non-zero"
+  brief="$home/data/brief-sched-ship/brief.md"
+  assert_grep "For a KNOWN timed wait (a deploy verification window, a rate-limit reset, an upstream release)," "$brief" \
+    "ship brief did not instruct a concrete scheduled-wait pause line"
+  # shellcheck disable=SC2016 # Literal backticks are deliberate: pinning the example text verbatim.
+  assert_grep '`paused: canary deploy verification until 14:30 UTC`' "$brief" \
+    "ship brief dropped the scheduled-wait pause example"
+  # shellcheck disable=SC2016 # Literal backticks are deliberate: pinning the example format verbatim.
+  assert_grep '`needs-decision: [key=<slug>] {summary of options}`' "$brief" \
+    "ship brief did not show the decision-key position on needs-decision"
+  # shellcheck disable=SC2016 # Literal backticks are deliberate: pinning the example format verbatim.
+  assert_grep '`resolved [key=<slug>]: {how it was decided or unblocked}`' "$brief" \
+    "ship brief did not show the decision-key position on resolved"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-sched-scout firstmate --scout >/dev/null 2>&1 \
+    || fail "fm-brief.sh scout scaffold exited non-zero"
+  brief="$home/data/brief-sched-scout/brief.md"
+  assert_grep "For a KNOWN timed wait (a deploy verification window, a rate-limit reset, an upstream release)," "$brief" \
+    "scout brief did not instruct a concrete scheduled-wait pause line"
+  # shellcheck disable=SC2016 # Literal backticks are deliberate: pinning the example text verbatim.
+  assert_grep '`paused: canary deploy verification until 14:30 UTC`' "$brief" \
+    "scout brief dropped the scheduled-wait pause example"
+  # shellcheck disable=SC2016 # Literal backticks are deliberate: pinning the example format verbatim.
+  assert_grep '`needs-decision: [key=<slug>] {summary of options}`' "$brief" \
+    "scout brief did not show the decision-key position on needs-decision"
+  # shellcheck disable=SC2016 # Literal backticks are deliberate: pinning the example format verbatim.
+  assert_grep '`resolved [key=<slug>]: {how it was decided or unblocked}`' "$brief" \
+    "scout brief did not show the decision-key position on resolved"
+
+  FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-sched-sm --secondmate --no-projects >/dev/null 2>&1 \
+    || fail "fm-brief.sh secondmate scaffold exited non-zero"
+  brief="$home/data/brief-sched-sm/brief.md"
+  assert_grep "For a KNOWN timed wait (a deploy verification window, a rate-limit reset, an upstream release)," "$brief" \
+    "secondmate charter did not instruct a concrete scheduled-wait pause line"
+  # shellcheck disable=SC2016 # Literal backticks are deliberate: pinning the example format verbatim.
+  assert_grep 'The key sits between the verb and the colon on both sides: `needs-decision: [key=<slug>] <summary>` opens it, `resolved [key=<slug>]: <how>` closes it.' "$brief" \
+    "secondmate charter did not show the decision-key position for both verbs"
+
+  pass "fm-brief.sh: scheduled-wait pause instructions and decision-key positions are pinned"
+}
+
 test_script_parses
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
@@ -630,3 +678,4 @@ test_secondmate_marked_request_reporting_contract
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_scheduled_wait_and_decision_key_wording
