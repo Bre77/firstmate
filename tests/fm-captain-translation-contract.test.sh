@@ -103,6 +103,16 @@ test_verbatim_internal_evidence_is_rejected_from_chat() {
   pass "captain chat rejects verbatim internal evidence while private reports stay precise"
 }
 
+test_routine_no_action_response_is_event_scoped() {
+  local contract
+  contract=$(section_9)
+  assert_contains "$contract" 'reply exactly `Captain, shipshape.` without characterizing the visible session' \
+    "section 9 does not require the exact event-scoped routine no-action response"
+  assert_not_contains "$contract" 'Captain, no decision is needed.' \
+    "section 9 implies the visible session has no unrelated open decisions"
+  pass "routine no-action response is exact and scoped to its event"
+}
+
 test_outward_facing_skill_points_reference_section_9_owner() {
   assert_grep "using \`AGENTS.md\` section 9's captain-facing translation contract" "$BOOTSTRAP" \
     "bootstrap diagnostics do not reference section 9 at captain handoff"
@@ -162,6 +172,8 @@ test_ahoy_owns_only_the_visible_session_recap() {
     "first-message fallback does not delegate to Bearings by relative pointer"
   assert_grep 'If no prior real captain message exists' "$AHOY" \
     "ahoy does not limit Bearings fallback to the first real captain message"
+  assert_grep 'Bearings alone owns its gathering, artifact, and response contract.' "$AHOY" \
+    "ahoy first-message fallback does not delegate to Bearings alone"
   assert_grep 'A captain boundary is an ordinary user-role message unless it matches one of the narrow operational exclusions below.' "$AHOY" \
     "ahoy lacks an explicit captain-authored boundary rule"
   assert_grep 'Exclude messages that begin with the current U+2063 `FIRSTMATE_OP:` injection prefix.' "$AHOY" \
@@ -184,8 +196,12 @@ test_ahoy_owns_only_the_visible_session_recap() {
     "later ahoy invocation is not explicitly session-history-only"
   assert_grep 'Do not call Bearings, shell commands, fleet snapshots, status readers, GitHub or browser APIs, tools, or file reads or writes.' "$AHOY" \
     "normal recap does not prohibit fresh fleet, file, and tool reads"
+  assert_grep 'Create no report, persist nothing' "$AHOY" \
+    "normal recap does not prohibit artifacts and storage"
   assert_grep 'do not guess current live state beyond the last visible event' "$AHOY" \
     "normal recap may falsely claim a live snapshot"
+  assert_grep 'The current `/ahoy` message is outside the recap interval.' "$AHOY" \
+    "current ahoy invocation is not excluded from the recap interval"
   assert_grep 'If context compaction makes the prior boundary unavailable' "$AHOY" \
     "ahoy does not disclose an unavailable compacted boundary"
   assert_grep 'summarize only visibly supported events' "$AHOY" \
@@ -195,6 +211,30 @@ test_ahoy_owns_only_the_visible_session_recap() {
   assert_no_grep "Captain's Call" "$AHOY" \
     "ahoy copied Bearings response contract instead of referencing its owner"
   pass "ahoy delegates first-message fallback and keeps later recaps visible-session-only"
+}
+
+test_ahoy_scans_visible_history_for_open_decisions() {
+  assert_grep 'preserve the ordinary recap interval: recap what happened after that message and before the current invocation.' "$AHOY" \
+    "ahoy no longer preserves its ordinary recap interval"
+  assert_grep 'inspect the entire session history visible to the current first mate before the current invocation for every explicit captain decision that remains unanswered' "$AHOY" \
+    "ahoy does not scan globally visible session history for open decisions"
+  assert_grep 'including decisions raised before the ordinary recap boundary.' "$AHOY" \
+    "ahoy does not include open decisions from before the recap boundary"
+  assert_grep 'A later unrelated captain message establishes a recap boundary but does not close an earlier decision.' "$AHOY" \
+    "ahoy lets unrelated captain messages close earlier decisions"
+  assert_grep 'Treat a decision as closed only when a later visible response substantively resolves it, chooses an option, declines it, grants or denies the requested approval, or otherwise directly addresses that decision.' "$AHOY" \
+    "ahoy lacks substantive-answer closure semantics"
+  assert_grep 'Include every visibly supported open decision once, and deduplicate by the decision' "$AHOY" \
+    "ahoy does not include and deduplicate visibly open decisions"
+  assert_grep "substance when the ordinary interval recap already represents it or its wording differs." "$AHOY" \
+    "ahoy deduplicates decisions by wording instead of substance"
+  assert_grep 'If no ordinary events occurred after the previous captain message but an older visibly open decision exists, report that decision instead of claiming nothing happened.' "$AHOY" \
+    "ahoy can incorrectly claim nothing happened while an older decision is open"
+  assert_grep 'Compacted history supports an open decision only when both its request and its still-unanswered status are visible' "$AHOY" \
+    "ahoy does not limit compacted decision reporting to visible support"
+  assert_grep 'report uncertainty instead of reconstructing hidden requests or answers.' "$AHOY" \
+    "ahoy may reconstruct hidden decision history after compaction"
+  pass "ahoy adds visibly open decisions without changing the ordinary recap boundary"
 }
 
 test_ahoy_user_role_injections_share_one_marker() {
@@ -243,9 +283,11 @@ test_scout_remains_allowed_house_vocabulary
 test_compressed_safety_labels_have_plain_renderings
 test_mapping_list_covers_high_risk_internal_families
 test_verbatim_internal_evidence_is_rejected_from_chat
+test_routine_no_action_response_is_event_scoped
 test_outward_facing_skill_points_reference_section_9_owner
 test_section_9_owner_is_not_duplicated_into_skills
 test_ahoy_is_an_internal_user_invocable_skill
 test_ahoy_readme_uses_cross_harness_convention
 test_ahoy_owns_only_the_visible_session_recap
+test_ahoy_scans_visible_history_for_open_decisions
 test_ahoy_user_role_injections_share_one_marker
