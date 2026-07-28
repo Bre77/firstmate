@@ -65,11 +65,19 @@ cmsg_inbox_dir() { printf '%s/captain-msg-inbox' "${STATE:-$FM_HOME/state}"; }
 cmsg_path()      { printf '/captain-msg'; }
 
 # Resolve CAPTAIN_MSG_DESTINATION, CAPTAIN_MSG_ACCOUNT_SID,
-# CAPTAIN_MSG_MESSAGING_SERVICE_SID, CAPTAIN_MSG_WEBHOOK_URL, CAPTAIN_MSG_OP_VAULT,
-# CAPTAIN_MSG_OP_ITEM, CAPTAIN_MSG_OP_AUTHTOKEN_ITEM. An explicit environment
-# variable always wins over the gate file, mainly for tests. Every value is
-# non-secret (SIDs, a public URL, and 1Password item/vault NAMES, never the
-# secrets themselves) - see docs/captain-messaging.md "Config schema".
+# CAPTAIN_MSG_MESSAGING_SERVICE_SID, CAPTAIN_MSG_FROM_ADDRESS, CAPTAIN_MSG_WEBHOOK_URL,
+# CAPTAIN_MSG_OP_VAULT, CAPTAIN_MSG_OP_ITEM, CAPTAIN_MSG_OP_AUTHTOKEN_ITEM. An
+# explicit environment variable always wins over the gate file, mainly for
+# tests. Every value is non-secret (SIDs, an RCS channel address, a public URL,
+# and 1Password item/vault NAMES, never the secrets themselves) - see
+# docs/captain-messaging.md "Config schema".
+#
+# A Twilio account can address an RCS sender either through a Messaging
+# Service's sender pool (CAPTAIN_MSG_MESSAGING_SERVICE_SID, Twilio picks the
+# channel) or directly by channel address (CAPTAIN_MSG_FROM_ADDRESS, e.g.
+# "rcs:teslemetry_fwz8vdzw_agent" - no Messaging Service needed, and none
+# exists on every account). Exactly one is required; cmsg_require_config
+# enforces that.
 cmsg_load_config() {
   local file raw
   file=$(cmsg_env_file)
@@ -83,6 +91,9 @@ cmsg_load_config() {
   if [ -n "${CAPTAIN_MSG_MESSAGING_SERVICE_SID+x}" ]; then raw=${CAPTAIN_MSG_MESSAGING_SERVICE_SID-}; else raw=$(cmsg_env_get CAPTAIN_MSG_MESSAGING_SERVICE_SID "$file"); fi
   CAPTAIN_MSG_MESSAGING_SERVICE_SID=$raw
 
+  if [ -n "${CAPTAIN_MSG_FROM_ADDRESS+x}" ]; then raw=${CAPTAIN_MSG_FROM_ADDRESS-}; else raw=$(cmsg_env_get CAPTAIN_MSG_FROM_ADDRESS "$file"); fi
+  CAPTAIN_MSG_FROM_ADDRESS=$raw
+
   if [ -n "${CAPTAIN_MSG_WEBHOOK_URL+x}" ]; then raw=${CAPTAIN_MSG_WEBHOOK_URL-}; else raw=$(cmsg_env_get CAPTAIN_MSG_WEBHOOK_URL "$file"); fi
   [ -n "$raw" ] || raw="https://fm.ba.id.au/captain-msg"
   CAPTAIN_MSG_WEBHOOK_URL=$raw
@@ -92,29 +103,39 @@ cmsg_load_config() {
   CAPTAIN_MSG_OP_VAULT=$raw
 
   if [ -n "${CAPTAIN_MSG_OP_ITEM+x}" ]; then raw=${CAPTAIN_MSG_OP_ITEM-}; else raw=$(cmsg_env_get CAPTAIN_MSG_OP_ITEM "$file"); fi
-  [ -n "$raw" ] || raw="Twilio"
+  [ -n "$raw" ] || raw="Twilio API key"
   CAPTAIN_MSG_OP_ITEM=$raw
 
   if [ -n "${CAPTAIN_MSG_OP_AUTHTOKEN_ITEM+x}" ]; then raw=${CAPTAIN_MSG_OP_AUTHTOKEN_ITEM-}; else raw=$(cmsg_env_get CAPTAIN_MSG_OP_AUTHTOKEN_ITEM "$file"); fi
-  [ -n "$raw" ] || raw="Twilio Auth Token"
+  [ -n "$raw" ] || raw="Twilio Auth token"
   CAPTAIN_MSG_OP_AUTHTOKEN_ITEM=$raw
 
   # shellcheck disable=SC2034 # Read by callers after sourcing.
   : "$CAPTAIN_MSG_DESTINATION" "$CAPTAIN_MSG_ACCOUNT_SID" "$CAPTAIN_MSG_MESSAGING_SERVICE_SID" \
-    "$CAPTAIN_MSG_WEBHOOK_URL" "$CAPTAIN_MSG_OP_VAULT" "$CAPTAIN_MSG_OP_ITEM" "$CAPTAIN_MSG_OP_AUTHTOKEN_ITEM"
+    "$CAPTAIN_MSG_FROM_ADDRESS" "$CAPTAIN_MSG_WEBHOOK_URL" "$CAPTAIN_MSG_OP_VAULT" \
+    "$CAPTAIN_MSG_OP_ITEM" "$CAPTAIN_MSG_OP_AUTHTOKEN_ITEM"
 }
 
 # cmsg_load_config, then fail loudly (stderr + return 1) if any key with no safe
-# default (destination, account sid, messaging service sid) is unset - a present
-# gate file with missing required keys is a misconfiguration, not "feature off".
+# default is unset - a present gate file with missing required keys is a
+# misconfiguration, not "feature off". Destination and account SID are always
+# required; exactly one of MESSAGING_SERVICE_SID/FROM_ADDRESS must be set (see
+# cmsg_load_config for why both exist).
 cmsg_require_config() {
   cmsg_load_config
   local missing=""
   [ -n "$CAPTAIN_MSG_DESTINATION" ] || missing="$missing CAPTAIN_MSG_DESTINATION"
   [ -n "$CAPTAIN_MSG_ACCOUNT_SID" ] || missing="$missing CAPTAIN_MSG_ACCOUNT_SID"
-  [ -n "$CAPTAIN_MSG_MESSAGING_SERVICE_SID" ] || missing="$missing CAPTAIN_MSG_MESSAGING_SERVICE_SID"
   if [ -n "$missing" ]; then
     echo "captain-msg: config/captain-msg.env is missing required key(s):$missing" >&2
+    return 1
+  fi
+  if [ -z "$CAPTAIN_MSG_MESSAGING_SERVICE_SID" ] && [ -z "$CAPTAIN_MSG_FROM_ADDRESS" ]; then
+    echo "captain-msg: config/captain-msg.env must set exactly one of CAPTAIN_MSG_MESSAGING_SERVICE_SID or CAPTAIN_MSG_FROM_ADDRESS" >&2
+    return 1
+  fi
+  if [ -n "$CAPTAIN_MSG_MESSAGING_SERVICE_SID" ] && [ -n "$CAPTAIN_MSG_FROM_ADDRESS" ]; then
+    echo "captain-msg: config/captain-msg.env must set only one of CAPTAIN_MSG_MESSAGING_SERVICE_SID or CAPTAIN_MSG_FROM_ADDRESS, not both" >&2
     return 1
   fi
 }

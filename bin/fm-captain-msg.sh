@@ -107,7 +107,17 @@ config_escape() {
 
 url_encode() { jq -rn --arg v "$1" '$v|@uri'; }
 
-BODY="To=$(url_encode "$CAPTAIN_MSG_DESTINATION")&MessagingServiceSid=$(url_encode "$CAPTAIN_MSG_MESSAGING_SERVICE_SID")&Body=$(url_encode "$MESSAGE")"
+# Two ways to address the RCS sender (cmsg_require_config already enforced
+# exactly one is set): a Messaging Service picks the channel automatically
+# from its sender pool (To=plain E.164); a direct channel address bypasses
+# that pool entirely (From/To both need the "rcs:" prefix - confirmed against
+# a live account with no Messaging Service and a bare-number To that Twilio
+# rejected as failed).
+if [ -n "$CAPTAIN_MSG_FROM_ADDRESS" ]; then
+  BODY="From=$(url_encode "rcs:${CAPTAIN_MSG_FROM_ADDRESS#rcs:}")&To=$(url_encode "rcs:${CAPTAIN_MSG_DESTINATION#rcs:}")&Body=$(url_encode "$MESSAGE")"
+else
+  BODY="To=$(url_encode "$CAPTAIN_MSG_DESTINATION")&MessagingServiceSid=$(url_encode "$CAPTAIN_MSG_MESSAGING_SERVICE_SID")&Body=$(url_encode "$MESSAGE")"
+fi
 API_URL="https://api.twilio.com/2010-04-01/Accounts/${CAPTAIN_MSG_ACCOUNT_SID}/Messages.json"
 
 HTTP_CODE=$(printf 'url = "%s"\nuser = "%s:%s"\ndata-raw = "%s"\n' \

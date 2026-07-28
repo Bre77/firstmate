@@ -73,7 +73,25 @@ print(base64.b64encode(digest).decode())
 
 # --- config gate writer -------------------------------------------------------
 
+FAKE_FROM_ADDRESS="teslemetry_fwz8vdzw_agent"
+
+# write_gate <home> [dest] [account]: direct-channel addressing
+# (CAPTAIN_MSG_FROM_ADDRESS), matching the real production account shape (no
+# Messaging Service).
 write_gate() {
+  local home=$1 dest=${2:-$FAKE_DEST} account=${3:-ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx}
+  mkdir -p "$home/config"
+  {
+    printf 'CAPTAIN_MSG_DESTINATION=%s\n' "$dest"
+    printf 'CAPTAIN_MSG_ACCOUNT_SID=%s\n' "$account"
+    printf 'CAPTAIN_MSG_FROM_ADDRESS=%s\n' "$FAKE_FROM_ADDRESS"
+    printf 'CAPTAIN_MSG_WEBHOOK_URL=%s\n' "$FAKE_URL"
+  } > "$home/config/captain-msg.env"
+}
+
+# write_gate_msid <home> [dest] [account] [mgsvc]: Messaging Service
+# addressing, for an account that has one instead.
+write_gate_msid() {
   local home=$1 dest=${2:-$FAKE_DEST} account=${3:-ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx} \
     mgsvc=${4:-MGxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx}
   mkdir -p "$home/config"
@@ -100,7 +118,7 @@ done
 case "$field" in
   username) val=${FM_TEST_OP_USERNAME-SKfakeapikeysidfakeapikeysid1234} ;;
   credential)
-    if [ "$item" = "Twilio Auth Token" ]; then
+    if [ "$item" = "Twilio Auth token" ]; then
       val=${FM_TEST_OP_AUTHTOKEN-fake-account-auth-token-12345}
     else
       val=${FM_TEST_OP_CREDENTIAL-fake-api-key-secret-000000000000} ;
@@ -311,6 +329,78 @@ test_send_success_and_no_secret_in_argv() {
   pass "fm-captain-msg.sh sends successfully and keeps the API key secret out of curl's argv"
 }
 
+test_send_direct_address_uses_rcs_prefixed_from_and_to() {
+  local home out stdin_log body
+  home=$(new_case send-direct-address)
+  write_gate "$home"
+  write_op_mock "$home/fakebin"
+  write_curl_mock "$home/fakebin"
+  stdin_log="$home/curl-stdin.log"
+
+  out=$(FM_TEST_CURL_HTTP_CODE=201 FM_TEST_CURL_BODY='{"sid":"SMdirect00000000000000000000000","status":"queued"}' \
+    FM_TEST_CURL_STDIN_LOG="$stdin_log" \
+    run_cmsg "$home" "Direct channel addressing check." 2>&1) \
+    || fail "a direct-address send should succeed"
+
+  body=$(sed -n 's/^data-raw = "\(.*\)"$/\1/p' "$stdin_log")
+  assert_contains "$body" "From=rcs%3A${FAKE_FROM_ADDRESS}" "the direct-address send did not carry a rcs:-prefixed From"
+  assert_contains "$body" "To=rcs%3A%2B" "the direct-address send did not carry a rcs:-prefixed To"
+  assert_not_contains "$body" "MessagingServiceSid" "a direct-address send must not also carry MessagingServiceSid"
+  pass "fm-captain-msg.sh uses rcs:-prefixed From/To when CAPTAIN_MSG_FROM_ADDRESS is configured"
+}
+
+test_send_messaging_service_uses_plain_to() {
+  local home out stdin_log body
+  home=$(new_case send-msid)
+  write_gate_msid "$home"
+  write_op_mock "$home/fakebin"
+  write_curl_mock "$home/fakebin"
+  stdin_log="$home/curl-stdin.log"
+
+  out=$(FM_TEST_CURL_HTTP_CODE=201 FM_TEST_CURL_BODY='{"sid":"SMmsid0000000000000000000000000","status":"queued"}' \
+    FM_TEST_CURL_STDIN_LOG="$stdin_log" \
+    run_cmsg "$home" "Messaging Service addressing check." 2>&1) \
+    || fail "a Messaging-Service send should succeed"
+
+  body=$(sed -n 's/^data-raw = "\(.*\)"$/\1/p' "$stdin_log")
+  assert_contains "$body" "MessagingServiceSid=MG" "the Messaging-Service send did not carry MessagingServiceSid"
+  assert_not_contains "$body" "rcs%3A" "a Messaging-Service send must use a plain To, not rcs:-prefixed"
+  assert_not_contains "$body" "From=" "a Messaging-Service send must not also carry a direct From"
+  pass "fm-captain-msg.sh uses a plain To and MessagingServiceSid when CAPTAIN_MSG_MESSAGING_SERVICE_SID is configured"
+}
+
+test_require_config_rejects_neither_addressing_mode() {
+  local home out rc
+  home=$(new_case cfg-neither-mode); mkdir -p "$home/config"
+  {
+    printf 'CAPTAIN_MSG_DESTINATION=%s\n' "$FAKE_DEST"
+    printf 'CAPTAIN_MSG_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n'
+  } > "$home/config/captain-msg.env"
+  write_op_mock "$home/fakebin"
+  write_curl_mock "$home/fakebin"
+  out=$(run_cmsg "$home" "hello captain" 2>&1); rc=$?
+  expect_code 1 "$rc" "neither addressing mode set should be refused"
+  assert_contains "$out" "exactly one of" "refusal did not explain exactly one addressing mode is required"
+  pass "fm-captain-msg.sh refuses when neither CAPTAIN_MSG_FROM_ADDRESS nor CAPTAIN_MSG_MESSAGING_SERVICE_SID is set"
+}
+
+test_require_config_rejects_both_addressing_modes() {
+  local home out rc
+  home=$(new_case cfg-both-modes); mkdir -p "$home/config"
+  {
+    printf 'CAPTAIN_MSG_DESTINATION=%s\n' "$FAKE_DEST"
+    printf 'CAPTAIN_MSG_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n'
+    printf 'CAPTAIN_MSG_FROM_ADDRESS=%s\n' "$FAKE_FROM_ADDRESS"
+    printf 'CAPTAIN_MSG_MESSAGING_SERVICE_SID=MGxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n'
+  } > "$home/config/captain-msg.env"
+  write_op_mock "$home/fakebin"
+  write_curl_mock "$home/fakebin"
+  out=$(run_cmsg "$home" "hello captain" 2>&1); rc=$?
+  expect_code 1 "$rc" "both addressing modes set should be refused"
+  assert_contains "$out" "only one of" "refusal did not explain only one addressing mode is allowed"
+  pass "fm-captain-msg.sh refuses when both CAPTAIN_MSG_FROM_ADDRESS and CAPTAIN_MSG_MESSAGING_SERVICE_SID are set"
+}
+
 # --- shared listener: /captain-msg signature validation ---------------------
 
 # The listener needs several CMHOOK_* env vars that only fm-clickstack-recv.sh
@@ -390,6 +480,28 @@ test_valid_signature_accepted_and_persisted() {
     "the persisted envelope must carry the reply body"
   cm_stop_listener "$pid"
   pass "a validly signed request from the configured captain number is accepted and persisted"
+}
+
+test_valid_signature_with_rcs_prefixed_from_accepted() {
+  # Twilio's real inbound RCS "From" is channel-prefixed ("rcs:+<E.164>"), not
+  # the plain number cm_start_listener's CMHOOK_FROM is configured with -
+  # confirmed against a live account's message history. This is the real wire
+  # shape; test_valid_signature_accepted_and_persisted above covers the
+  # already-plain case for completeness.
+  local home info pid port sig code from
+  home="$TMP_ROOT/sig-valid-rcs-prefix"
+  info=$(cm_start_listener "$home"); pid=${info%% *}; port=${info##* }
+  from="rcs:$FAKE_DEST"
+  sig=$(twilio_sign "$FAKE_URL" "$FAKE_AUTH_TOKEN" "MessageSid=SM00000000000000000000000000000008" "From=$from" "Body=Real wire shape")
+  code=$(PATH="$BASE_PATH" curl -s -o /dev/null -w '%{http_code}' \
+    -H "X-Twilio-Signature: $sig" \
+    --data-urlencode "MessageSid=SM00000000000000000000000000000008" \
+    --data-urlencode "From=$from" --data-urlencode "Body=Real wire shape" \
+    "http://127.0.0.1:$port/captain-msg")
+  expect_code 200 "$code" "a rcs:-prefixed From matching the configured captain number must be accepted"
+  assert_present "$home/inbox/message-SM00000000000000000000000000000008.json" "the accepted reply must be persisted"
+  cm_stop_listener "$pid"
+  pass "an inbound rcs:-prefixed From is accepted after channel-prefix stripping"
 }
 
 test_invalid_signature_rejected() {
@@ -641,8 +753,13 @@ test_send_missing_op_token_fails_loud
 test_send_missing_credential_field_names_it
 test_send_non_2xx_response_fails_loud_and_warns_no_fallback
 test_send_success_and_no_secret_in_argv
+test_send_direct_address_uses_rcs_prefixed_from_and_to
+test_send_messaging_service_uses_plain_to
+test_require_config_rejects_neither_addressing_mode
+test_require_config_rejects_both_addressing_modes
 test_route_404_when_disabled
 test_valid_signature_accepted_and_persisted
+test_valid_signature_with_rcs_prefixed_from_accepted
 test_invalid_signature_rejected
 test_from_mismatch_rejected_even_with_valid_signature
 test_idempotent_redelivery_by_message_sid

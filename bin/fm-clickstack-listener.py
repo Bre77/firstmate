@@ -52,8 +52,11 @@ Config is passed in by the launcher (bin/fm-clickstack-recv.sh) via environment:
                          the Twilio console webhook URL byte-for-byte; signature
                          validation is computed over this URL, not the loopback
                          request line)
-  CMHOOK_FROM            expected captain phone number in E.164; an inbound
-                         request whose Twilio "From" does not match is rejected
+  CMHOOK_FROM            expected captain phone number in plain E.164 (no
+                         channel prefix); an inbound request's Twilio "From"
+                         (channel-prefixed, e.g. "rcs:+<E.164>") has that
+                         prefix stripped before comparison, and is rejected
+                         when it still does not match
                          even with a valid signature (empty skips this check)
   CMHOOK_INBOX           inbox directory for accepted captain-msg replies
 """
@@ -419,7 +422,13 @@ class Handler(BaseHTTPRequestHandler):
             self.log_error("captain-msg: rejected - invalid or missing X-Twilio-Signature")
             self._reply(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
             return
-        if CMHOOK_FROM and form.get("From", "") != CMHOOK_FROM:
+        # Twilio's RCS "From" is channel-prefixed ("rcs:+<E.164>"), confirmed
+        # against a live account; CMHOOK_FROM is configured as a plain E.164
+        # number, so strip the channel prefix before comparing.
+        inbound_from = form.get("From", "")
+        if inbound_from.startswith("rcs:"):
+            inbound_from = inbound_from[len("rcs:"):]
+        if CMHOOK_FROM and inbound_from != CMHOOK_FROM:
             self.log_error("captain-msg: rejected - From did not match the configured captain number")
             self._reply(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
             return
