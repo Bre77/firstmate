@@ -14,10 +14,12 @@
 # no-mistakes bare repo, so it can never misroute to upstream.
 # See docs/fork-only-delivery.md for when to use fork-only vs upstream delivery.
 #
-# The fork repo runs no CI provenance check, so LOCAL validation is the only
-# gate. The default gate mirrors .github/workflows/ci.yml (the lint + behavior
-# tests jobs): shellcheck the shell scripts, then run each tests/*.test.sh. Keep
-# it in sync with that workflow; pass --check to substitute a different gate.
+# This script runs a LOCAL gate before pushing, mirroring .github/workflows/ci.yml
+# (the lint + behavior tests jobs): shellcheck the shell scripts, then run each
+# tests/*.test.sh. Keep it in sync with that workflow; pass --check to substitute
+# a different gate. The fork's own PR checks (lint, portable behavior-test
+# suites, stock-macOS-Bash snapshot compatibility) still run after the push and
+# must go green before the PR can be folded.
 #
 # Operates on the current working directory's git worktree. Refuses to deliver
 # from a detached HEAD or from the fork's default branch, so only a feature
