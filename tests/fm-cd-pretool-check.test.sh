@@ -142,8 +142,7 @@ matrix_case A34 allow 'command -V cd'
 matrix_case A35 allow 'command -pv cd'
 matrix_case A36 allow 'command -vp cd'
 
-MATRIX_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-cd-policy-matrix.XXXXXX")
-FM_TEST_CLEANUP_DIRS+=("$MATRIX_TMP")
+MATRIX_TMP=$(fm_test_tmproot fm-cd-policy-matrix)
 
 run_matrix_entry() {
   local id=$1 expected=$2 entry=$3 cmd=$4 payload out_file err_file rc

@@ -113,7 +113,7 @@ test_family_map_labels_this_contract() {
 
 test_aggregate_failure_under_concurrency() {
   local tmp pass_f fail_f harness rc out
-  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-isolation-agg.XXXXXX")
+  tmp=$(fm_test_tmproot fm-isolation-agg)
   pass_f="$tmp/pass.test.sh"
   fail_f="$tmp/fail.test.sh"
   cat >"$pass_f" <<'SH'
@@ -172,7 +172,6 @@ SH
   [ "$rc" -ne 0 ] || fail "concurrent aggregate must fail when any candidate fails"
   printf '%s\n' "$out" | grep -Fq 'FM_ISOLATION_SUMMARY total=2 failed=1' \
     || fail "aggregate summary must report total=2 failed=1: $out"
-  rm -rf "$tmp"
   pass "aggregate failure reporting survives concurrency"
 }
 

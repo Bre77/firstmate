@@ -22,15 +22,15 @@ POLICY="$ROOT/bin/fm-arm-command-policy.mjs"
 # matrix classifies stays the real, unaltered $ROOT. `state/` is gitignored
 # and absent on a fresh checkout (CI's), so fm_primary_scope_matches's own
 # state-directory check needs the same create-if-absent treatment. Only touch
-# either fixture (and clean it up via FM_TEST_CLEANUP_DIRS, once the matrix's
-# own EXIT trap installs below) when $ROOT does not already carry a genuine one.
+# either fixture (and register it for removal) when $ROOT does not already
+# carry a genuine one.
 if [ ! -e "$ROOT/.fm-secondmate-home" ]; then
   printf 'fm-arm-pretool-check-fixture\n' > "$ROOT/.fm-secondmate-home"
-  FM_TEST_CLEANUP_DIRS+=("$ROOT/.fm-secondmate-home")
+  fm_test_track_cleanup "$ROOT/.fm-secondmate-home"
 fi
 if [ ! -d "$ROOT/state" ]; then
   mkdir -p "$ROOT/state"
-  FM_TEST_CLEANUP_DIRS+=("$ROOT/state")
+  fm_test_track_cleanup "$ROOT/state"
 fi
 
 # --- full cross-harness acceptance matrix ----------------------------------
@@ -160,9 +160,7 @@ matrix_case E15 allow '$FM_HOME/bin/fm-watch-arm.sh'
 matrix_case E16 allow '~/firstmate/bin/fm-watch-checkpoint.sh --seconds 180'
 matrix_case E17 allow 'for f in 1; do echo fm-watch; done'
 
-MATRIX_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-arm-policy-matrix.XXXXXX")
-FM_TEST_CLEANUP_DIRS+=("$MATRIX_TMP")
-trap fm_test_cleanup EXIT
+MATRIX_TMP=$(fm_test_tmproot fm-arm-policy-matrix)
 
 run_matrix_entry() {
   local id=$1 expected=$2 entry=$3 cmd=$4 payload out_file err_file rc
