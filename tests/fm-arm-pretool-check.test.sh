@@ -19,12 +19,18 @@ POLICY="$ROOT/bin/fm-arm-command-policy.mjs"
 # checker would otherwise deny every "allow" case below. Mark it as a fixture
 # secondmate home so fm_primary_scope_matches force-includes it, exactly as a
 # real marked secondmate home would be, while every $ROOT-anchored path the
-# matrix classifies stays the real, unaltered $ROOT. Only touch the marker (and
-# clean it up via FM_TEST_CLEANUP_DIRS, once the matrix's own EXIT trap
-# installs below) when $ROOT does not already carry a genuine one.
+# matrix classifies stays the real, unaltered $ROOT. `state/` is gitignored
+# and absent on a fresh checkout (CI's), so fm_primary_scope_matches's own
+# state-directory check needs the same create-if-absent treatment. Only touch
+# either fixture (and clean it up via FM_TEST_CLEANUP_DIRS, once the matrix's
+# own EXIT trap installs below) when $ROOT does not already carry a genuine one.
 if [ ! -e "$ROOT/.fm-secondmate-home" ]; then
   printf 'fm-arm-pretool-check-fixture\n' > "$ROOT/.fm-secondmate-home"
   FM_TEST_CLEANUP_DIRS+=("$ROOT/.fm-secondmate-home")
+fi
+if [ ! -d "$ROOT/state" ]; then
+  mkdir -p "$ROOT/state"
+  FM_TEST_CLEANUP_DIRS+=("$ROOT/state")
 fi
 
 # --- full cross-harness acceptance matrix ----------------------------------
