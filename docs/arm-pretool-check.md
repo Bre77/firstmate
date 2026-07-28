@@ -53,6 +53,15 @@ Malformed or empty stdin, invalid JSON, missing `jq` for stdin transport, missin
 This transport behavior prevents a broken hook from denying every shell tool call.
 Malformed or unsupported shell syntax that contains a protected command is a semantic classification result and fails closed.
 
+## Primary/crew scoping
+
+`bin/fm-turnend-guard.sh`, `bin/fm-claude-stop-autoarm.sh`, `bin/fm-subagent-pretool-check.sh`, and `bin/fm-sessionstart-nudge.sh` all scope themselves to a genuine firstmate primary home (the main home or a marked secondmate home) via `bin/fm-primary-scope-lib.sh`'s `fm_primary_scope_matches`, and fall through inert outside that scope because their guarded action is legitimate for a crewmate.
+This seatbelt uses the same predicate but the opposite polarity: only a firstmate primary ever arms or checkpoints the watcher, so a crewmate or scout task worktree - the linked `git worktree` shape `bin/fm-spawn.sh` always hands out - is denied as `[watcher-non-primary]` instead of falling through inert.
+The gate runs once the command survives the strict-superset prefilter above and before the Node policy owner is even consulted, so a plain, unobfuscated arm command from a crew pane - a shape the classifier alone would bless - is still denied.
+An unrelated command that the prefilter already fast-allows never reaches this gate.
+
+`FM_ROOT_OVERRIDE` and `FM_STATE_OVERRIDE` let a test simulate a different scope without a second real checkout, mirroring the sibling guards' test-only escape hatches.
+
 ## Command-position classification
 
 The tokenizer recognizes cooked words with quote provenance, comments, heredoc bodies, shell list operators, pipelines, redirections, command and process substitutions, parenthesized subshells, brace groups, and literal nested execution payloads.
@@ -139,7 +148,9 @@ Every semantic deny includes one stable code in square brackets before its prose
 | `broad-watcher-kill` | An actual broad process kill targets the watcher. |
 | `unclassifiable-protected-command` | Malformed or unsupported syntax contains a protected command and cannot be safely classified. |
 | `watcher-direct` | A direct `bin/fm-watch.sh` execution; the watcher must be reached through `bin/fm-watch-arm.sh` or `bin/fm-watch-checkpoint.sh`. |
+| `watcher-non-primary` | The caller is outside a genuine firstmate primary scope (see "Primary/crew scoping" above); the Node policy owner was never consulted. |
 
+`watcher-non-primary` is the one code the wrapper itself issues; every other code comes from `bin/fm-arm-command-policy.mjs`.
 Reason codes are the stable contract for tests and adapters.
 Prose may improve without changing adapter behavior.
 
@@ -231,12 +242,13 @@ Every native-path automatic marker was present and every deny sentinel remained 
 `tests/fm-arm-pretool-check.test.sh` owns the adversarial acceptance matrix.
 Every row runs through Codex-shaped stdin, Claude-shaped stdin, Grok-shaped stdin, OpenCode-shaped CLI, and Pi-shaped CLI entry forms.
 The suite also verifies real newline bytes, direct classifier reason codes, comments, heredoc data, malformed and unsupported protected syntax, constructed dynamic payloads, malformed transport fail-open behavior, missing runtime fail-open behavior, output shapes, and exact adapter field forwarding plus exit-2 mapping.
+Because the suite's own checkout is itself a task worktree, it marks its `$ROOT` as a fixture secondmate home so the acceptance matrix keeps exercising ordinary primary-scope behavior; a separate isolated fixture (never `$ROOT`) proves a genuine crew task worktree denies a plain, unobfuscated arm command as `[watcher-non-primary]`, that an unrelated command still fast-allows there, and that a marked secondmate home still reaches the Node classifier.
 
 Run:
 
 ```sh
 bash -n bin/fm-arm-pretool-check.sh
-shellcheck bin/fm-arm-pretool-check.sh tests/fm-arm-pretool-check.test.sh
+shellcheck --external-sources bin/fm-arm-pretool-check.sh tests/fm-arm-pretool-check.test.sh
 node --check bin/fm-arm-command-policy.mjs
 tests/fm-arm-pretool-check.test.sh
 bin/fm-test-run.sh --all
