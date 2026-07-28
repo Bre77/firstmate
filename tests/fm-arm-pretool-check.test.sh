@@ -14,6 +14,19 @@ set -u
 CHECK="$ROOT/bin/fm-arm-pretool-check.sh"
 POLICY="$ROOT/bin/fm-arm-command-policy.mjs"
 
+# This suite's own $ROOT is itself a task worktree (a linked `git worktree`,
+# never the primary checkout), so a genuine primary/crew scope gate on the
+# checker would otherwise deny every "allow" case below. Mark it as a fixture
+# secondmate home so fm_primary_scope_matches force-includes it, exactly as a
+# real marked secondmate home would be, while every $ROOT-anchored path the
+# matrix classifies stays the real, unaltered $ROOT. Only touch the marker (and
+# clean it up via FM_TEST_CLEANUP_DIRS, once the matrix's own EXIT trap
+# installs below) when $ROOT does not already carry a genuine one.
+if [ ! -e "$ROOT/.fm-secondmate-home" ]; then
+  printf 'fm-arm-pretool-check-fixture\n' > "$ROOT/.fm-secondmate-home"
+  FM_TEST_CLEANUP_DIRS+=("$ROOT/.fm-secondmate-home")
+fi
+
 # --- full cross-harness acceptance matrix ----------------------------------
 
 MATRIX_IDS=()
@@ -528,11 +541,71 @@ test_pi_extension_carries_pretool_check() {
   pass ".pi primary extension: tool_call handler invokes the shared checker and can block"
 }
 
+# --- primary/crew scoping (the gap closed 2026-07-28) -----------------------
+#
+# Everything above runs in the fixture-marked $ROOT, so it already proves
+# ordinary Node-classifier behavior is unchanged in a genuine primary scope.
+# These build an isolated scratch fixture (never $ROOT) to prove the opposite
+# side: a crewmate/scout task worktree - a real linked `git worktree` with no
+# secondmate marker, exactly what bin/fm-spawn.sh hands out - must never arm or
+# checkpoint the watcher, even for a plain command the classifier alone would
+# bless.
+
+CREW_TMP=$(fm_test_tmproot fm-arm-pretool-crew)
+CREW_PRIMARY="$CREW_TMP/primary"
+CREW="$CREW_TMP/crew"
+mkdir -p "$CREW_PRIMARY/bin" "$CREW_PRIMARY/state"
+printf '# fixture\n' > "$CREW_PRIMARY/AGENTS.md"
+git -C "$CREW_PRIMARY" init -q
+git -C "$CREW_PRIMARY" config user.name fixture
+git -C "$CREW_PRIMARY" config user.email fixture@example.test
+git -C "$CREW_PRIMARY" add AGENTS.md
+git -C "$CREW_PRIMARY" commit -qm fixture
+git -C "$CREW_PRIMARY" worktree add -q -b fm-arm-pretool-crew-fixture "$CREW" >/dev/null
+mkdir -p "$CREW/bin" "$CREW/state"
+printf '# fixture\n' > "$CREW/AGENTS.md"
+
+test_crew_worktree_denies_unobfuscated_arm() {
+  local out_file err_file rc=0
+  out_file="$CREW_TMP/crew.out"
+  err_file="$CREW_TMP/crew.err"
+  FM_ROOT_OVERRIDE="$CREW" FM_HOME="$CREW" FM_STATE_OVERRIDE="$CREW/state" \
+    "$CHECK" --command 'bin/fm-watch-arm.sh' >"$out_file" 2>"$err_file" || rc=$?
+  [ "$rc" -eq 2 ] || fail "a plain, unobfuscated arm command from a crew task worktree must deny, got exit $rc: $(cat "$err_file")"
+  jq -e '.hookSpecificOutput.permissionDecision == "deny" and (.systemMessage | startswith("[watcher-non-primary]"))' "$err_file" >/dev/null 2>&1 \
+    || fail "crew-context deny must carry the [watcher-non-primary] reason code: $(cat "$err_file")"
+  pass "a deliberate direct watcher-arm invocation from a crew task worktree is denied (the gap this change closes)"
+}
+
+test_crew_worktree_still_fast_allows_unrelated_commands() {
+  local rc=0
+  FM_ROOT_OVERRIDE="$CREW" FM_HOME="$CREW" FM_STATE_OVERRIDE="$CREW/state" \
+    "$CHECK" --command 'ls -la' >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 0 ] || fail "an unrelated command must still fast-allow from a crew task worktree, got exit $rc"
+  pass "crew task worktree: an unrelated command stays a fast allow"
+}
+
+test_marked_secondmate_home_keeps_ordinary_classifier_behavior() {
+  local second rc=0
+  second="$CREW_TMP/second"
+  git -C "$CREW_PRIMARY" worktree add -q -b fm-arm-pretool-secondmate-fixture "$second" >/dev/null
+  mkdir -p "$second/bin" "$second/state"
+  printf '# fixture\n' > "$second/AGENTS.md"
+  printf 'sm-fixture\n' > "$second/.fm-secondmate-home"
+  cp "$ROOT/bin/fm-arm-command-policy.mjs" "$second/bin/"
+  FM_ROOT_OVERRIDE="$second" FM_HOME="$second" FM_STATE_OVERRIDE="$second/state" \
+    "$CHECK" --command 'bin/fm-watch-arm.sh &' >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 2 ] || fail "a marked secondmate home operates its own fleet and must reach the Node classifier, got exit $rc"
+  pass "a marked secondmate home stays in scope and keeps ordinary classifier behavior"
+}
+
 # --- shellcheck (belt-and-suspenders; CI/CONTRIBUTING.md also runs this) -----
 
 test_shellcheck_clean() {
   command -v shellcheck >/dev/null 2>&1 || { pass "shellcheck not installed, skipping"; return; }
-  shellcheck "$CHECK" >/dev/null 2>&1 || fail "bin/fm-arm-pretool-check.sh is not shellcheck-clean"
+  # --external-sources matches bin/fm-lint.sh: it follows the tracked
+  # fm-primary-scope-lib.sh source directive instead of reporting SC1091.
+  shellcheck --external-sources "$CHECK" >/dev/null 2>&1 || fail "bin/fm-arm-pretool-check.sh is not shellcheck-clean"
   pass "bin/fm-arm-pretool-check.sh is shellcheck-clean"
 }
 
@@ -559,4 +632,7 @@ test_claude_settings_pretool_hook_wired
 test_codex_hooks_pretool_wired
 test_opencode_pretool_plugin_wired
 test_pi_extension_carries_pretool_check
+test_crew_worktree_denies_unobfuscated_arm
+test_crew_worktree_still_fast_allows_unrelated_commands
+test_marked_secondmate_home_keeps_ordinary_classifier_behavior
 test_shellcheck_clean

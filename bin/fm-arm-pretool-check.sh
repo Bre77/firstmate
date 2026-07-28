@@ -32,6 +32,10 @@
 # Codex blocks on exit 2 and displays stderr.
 # Grok consumes the stdout decision object.
 # OpenCode and Pi consume exit 2 plus stderr.
+#
+# Outside a genuine firstmate primary home (bin/fm-primary-scope-lib.sh) this
+# denies as [watcher-non-primary] instead of falling through inert: unlike its
+# sibling guards, a deny-by-default seatbelt must fail CLOSED on scope, not open.
 set -u
 
 CMD=""
@@ -49,7 +53,24 @@ Exits 0 to allow and 2 to deny.
 The deny reason is written to stderr, with a Grok decision object on stdout
 unless --claude is supplied.
 Malformed transport and an unavailable classifier runtime fail open.
+Outside a genuine firstmate primary home this instead fails CLOSED and denies
+any command that could be a watcher-arm attempt, regardless of shape.
 EOF
+}
+
+json_escape() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr '\n' ' '
+}
+
+# Render the shared deny shape for CODE/REASON and exit 2. Used both by the
+# primary-scope gate and by the Node policy owner's decisions.
+emit_deny() {
+  local code=$1 reason=$2 detail escaped
+  detail="[$code] $reason"
+  escaped=$(json_escape "$detail")
+  printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"%s"}\n' "$escaped" >&2
+  [ "$CLAUDE_MODE" -eq 1 ] || printf '{"decision":"deny","reason":"%s"}\n' "$escaped"
+  exit 2
 }
 
 while [ "$#" -gt 0 ]; do
@@ -143,9 +164,18 @@ case "$CMD" in
 esac
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || exit 0
-ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P) || exit 0
-ACTIVE_HOME=${FM_HOME:-$ROOT}
+ROOT=${FM_ROOT_OVERRIDE:-$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P)} || exit 0
+ACTIVE_HOME=${FM_HOME:-${FM_ROOT_OVERRIDE:-$ROOT}}
+STATE=${FM_STATE_OVERRIDE:-$ACTIVE_HOME/state}
 POLICY="$ROOT/bin/fm-arm-command-policy.mjs"
+
+# Scoped like the turn-end and subagent-dispatch guards, but deny instead of
+# allow outside primary scope: a plain, unobfuscated arm command from a crew
+# pane would otherwise reach and pass the Node classifier unchanged.
+# shellcheck source=bin/fm-primary-scope-lib.sh
+. "$SCRIPT_DIR/fm-primary-scope-lib.sh" || exit 0
+fm_primary_scope_matches "$ROOT" "$STATE" || emit_deny watcher-non-primary \
+  "the watcher-arm seatbelt only operates for a genuine firstmate primary session (the main home or a marked secondmate home); a crewmate or scout task worktree must never arm or checkpoint the watcher directly"
 
 command -v node >/dev/null 2>&1 || exit 0
 [ -f "$POLICY" ] || exit 0
@@ -162,12 +192,4 @@ CODE=${REST%%"$TAB"*}
 REASON=${REST#*"$TAB"}
 [ -n "$CODE" ] && [ -n "$REASON" ] && [ "$REASON" != "$REST" ] || exit 0
 
-json_escape() {
-  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr '\n' ' '
-}
-
-DETAIL="[$CODE] $REASON"
-ESCAPED=$(json_escape "$DETAIL")
-printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"%s"}\n' "$ESCAPED" >&2
-[ "$CLAUDE_MODE" -eq 1 ] || printf '{"decision":"deny","reason":"%s"}\n' "$ESCAPED"
-exit 2
+emit_deny "$CODE" "$REASON"
