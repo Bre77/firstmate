@@ -53,27 +53,45 @@ pass() {
 # --- self-cleaning temp root ------------------------------------------------
 #
 # fm_test_tmproot <prefix> echoes a fresh temp dir and registers it for removal
-# on EXIT. The first call installs the cleanup trap. A test file that needs
-# extra teardown (e.g. killing a daemon) should define its own EXIT trap and
+# on exit, including on failure or interrupt. A test file that needs extra
+# teardown (e.g. killing a daemon) should define its own EXIT/INT/TERM trap and
 # call fm_test_cleanup from inside it so registered dirs are still removed.
+#
+# Registration goes through a ledger file, not an in-memory array: call sites
+# use command substitution (root=$(fm_test_tmproot prefix)), which runs this
+# function in a subshell, so an array append there never reaches the caller.
+# The removal trap is installed once here at source time in the caller's real
+# shell (FM_TEST_LIB_SOURCED above blocks a re-source from reinstalling it).
 
-FM_TEST_CLEANUP_DIRS=()
+FM_TEST_CLEANUP_LEDGER=$(mktemp "${TMPDIR:-/tmp}/fm-test-cleanup.XXXXXX")
 
 fm_test_cleanup() {
   local d
-  for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do
+  [ -f "$FM_TEST_CLEANUP_LEDGER" ] || return 0
+  while IFS= read -r d; do
     [ -n "$d" ] && rm -rf "$d"
-  done
+  done < "$FM_TEST_CLEANUP_LEDGER"
+  rm -f "$FM_TEST_CLEANUP_LEDGER"
 }
+trap fm_test_cleanup EXIT INT TERM
 
 fm_test_tmproot() {
   local prefix=${1:-fm-test} root
   root=$(mktemp -d "${TMPDIR:-/tmp}/${prefix}.XXXXXX")
-  if [ "${#FM_TEST_CLEANUP_DIRS[@]}" -eq 0 ]; then
-    trap fm_test_cleanup EXIT
-  fi
-  FM_TEST_CLEANUP_DIRS+=("$root")
+  printf '%s\n' "$root" >> "$FM_TEST_CLEANUP_LEDGER"
   printf '%s\n' "$root"
+}
+
+# fm_test_track_cleanup <path>... registers one or more already-created paths
+# (e.g. from a direct mktemp, not fm_test_tmproot) for removal by
+# fm_test_cleanup. Call it at the top level of the sourcing script, never
+# inside a command-substitution subshell, or the registration is lost the same
+# way described above.
+fm_test_track_cleanup() {
+  local d
+  for d in "$@"; do
+    [ -n "$d" ] && printf '%s\n' "$d" >> "$FM_TEST_CLEANUP_LEDGER"
+  done
 }
 
 # --- fakebin / PATH shims ---------------------------------------------------

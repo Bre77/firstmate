@@ -136,7 +136,7 @@ init_changed_fixture_repo() {
 
 test_changed_dependency_selection_and_unmapped_failure() {
   local tmp repo listed rc
-  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-changed.XXXXXX")
+  tmp=$(fm_test_tmproot fm-test-run-changed)
   repo="$tmp/repo"
   init_changed_fixture_repo "$repo"
 
@@ -181,13 +181,12 @@ test_changed_dependency_selection_and_unmapped_failure() {
   [ "$rc" -eq 2 ] || fail "unmapped changed source must fail with exit 2, got $rc"
   grep -Fq 'no changed-test mapping for source path: src/unmapped.ts' "$tmp/err" \
     || fail "unmapped changed source failure is not actionable: $(cat "$tmp/err")"
-  rm -rf "$tmp"
   pass "changed selection covers dependents and fails closed for unmapped source"
 }
 
 test_empty_selection_emits_summary() {
   local tmp repo out json
-  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-empty.XXXXXX")
+  tmp=$(fm_test_tmproot fm-test-run-empty)
   repo="$tmp/repo"
   init_changed_fixture_repo "$repo"
   printf 'documentation only\n' >"$repo/README.md"
@@ -202,14 +201,13 @@ doc = json.load(open(sys.argv[1]))
 assert doc["summary"] == {"duration_ms": 0, "failed": 0, "skipped_gate": 0, "total": 0}
 assert doc["scripts"] == []
 assert doc["families"] == []
-' "$json" || { rm -rf "$tmp"; fail "empty selection JSON summary is wrong"; }
-  rm -rf "$tmp"
+' "$json" || fail "empty selection JSON summary is wrong"
   pass "empty changed selection emits deterministic text and JSON summaries"
 }
 
 test_timing_markers_and_json() {
   local tmp fixture out json begin_n end_n summary
-  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-timing.XXXXXX")
+  tmp=$(fm_test_tmproot fm-test-run-timing)
   fixture="$tmp/ok.test.sh"
   out="$tmp/out.txt"
   json="$tmp/timing.json"
@@ -220,7 +218,7 @@ exit 0
 SH
   chmod +x "$fixture"
   "$RUNNER" --json "$json" "$fixture" >"$out" 2>"$tmp/err.txt" \
-    || { rm -rf "$tmp"; fail "runner should pass on a green fixture"; }
+    || fail "runner should pass on a green fixture"
   begin_n=$(grep -c '^FM_TEST_BEGIN ' "$out" || true)
   end_n=$(grep -c '^FM_TEST_END ' "$out" || true)
   [ "$begin_n" -eq 1 ] || fail "expected one FM_TEST_BEGIN, got $begin_n"
@@ -248,14 +246,13 @@ assert doc["summary"]["total"] == 1
 assert doc["summary"]["failed"] == 0
 assert "duration_ms" in doc["scripts"][0]
 assert "family" in doc["scripts"][0]
-' "$json" || { rm -rf "$tmp"; fail "JSON timing artifact missing required fields"; }
-  rm -rf "$tmp"
+' "$json" || fail "JSON timing artifact missing required fields"
   pass "timing markers and JSON artifact are valid"
 }
 
 test_aggregate_exit_behavior() {
   local tmp pass_f fail_f rc
-  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-agg.XXXXXX")
+  tmp=$(fm_test_tmproot fm-test-run-agg)
   pass_f="$tmp/pass.test.sh"
   fail_f="$tmp/fail.test.sh"
   cat >"$pass_f" <<'SH'
@@ -281,14 +278,13 @@ SH
   "$RUNNER" "$pass_f" >"$tmp/out2.txt" 2>"$tmp/err2.txt"
   rc=$?
   set -e
-  [ "$rc" -eq 0 ] || { rm -rf "$tmp"; fail "aggregate exit must be 0 when every script passes"; }
-  rm -rf "$tmp"
+  [ "$rc" -eq 0 ] || fail "aggregate exit must be 0 when every script passes"
   pass "aggregate exit reflects any script failure"
 }
 
 test_gate_skip_accounting() {
   local tmp skip_f out json
-  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-skip.XXXXXX")
+  tmp=$(fm_test_tmproot fm-test-run-skip)
   skip_f="$tmp/skip.test.sh"
   out="$tmp/out.txt"
   json="$tmp/timing.json"
@@ -310,14 +306,13 @@ doc = json.load(open(sys.argv[1]))
 assert doc["scripts"][0]["gate_skip"] is True
 assert doc["summary"]["skipped_gate"] == 1
 assert doc["summary"]["failed"] == 0
-' "$json" || { rm -rf "$tmp"; fail "JSON gate_skip accounting is wrong"; }
-  rm -rf "$tmp"
+' "$json" || fail "JSON gate_skip accounting is wrong"
   pass "gate-skip accounting is honest and non-failing"
 }
 
 test_fail_on_gate_skip_token() {
   local tmp skip_f out rc
-  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-fail-skip.XXXXXX")
+  tmp=$(fm_test_tmproot fm-test-run-fail-skip)
   skip_f="$tmp/skip.test.sh"
   out="$tmp/out.txt"
   cat >"$skip_f" <<'SH'
@@ -335,7 +330,6 @@ SH
     || fail "summary must report failed=1 under fail-on-gate-skip: $(grep FM_TEST_SUMMARY "$out")"
   grep -q 'required gate skip token' "$tmp/err.txt" \
     || fail "runner must log the required gate skip token"
-  rm -rf "$tmp"
   pass "fail-on-gate-skip converts herdr-not-found into a hard failure"
 }
 
@@ -498,7 +492,7 @@ PY
 
 test_jobs_requires_proven_isolated() {
   local tmp rc
-  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-jobs.XXXXXX")
+  tmp=$(fm_test_tmproot fm-test-run-jobs)
   set +e
   "$RUNNER" --jobs 2 --lane portable-serial >"$tmp/out" 2>"$tmp/err"
   rc=$?
@@ -511,13 +505,12 @@ test_jobs_requires_proven_isolated() {
   rc=$?
   set -e
   [ "$rc" -eq 2 ] || fail "--jobs on watcher-lock must refuse, got $rc"
-  rm -rf "$tmp"
   pass "--jobs refuses non-proven / stateful selections"
 }
 
 test_jobs_parallel_scheduler_and_failure_propagation() {
   local tmp repo runner evidence fake_bin a b c d rc begin_n end_n
-  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-jobs-sched.XXXXXX")
+  tmp=$(fm_test_tmproot fm-test-run-jobs-sched)
   repo="$tmp/repo"
   runner="$repo/bin/fm-test-run.sh"
   evidence="$tmp/evidence"
@@ -566,7 +559,7 @@ SH
     "$a" "$b" "$c" >"$tmp/out" 2>"$tmp/err"
   rc=$?
   set -e
-  [ "$rc" -eq 0 ] || { cat "$tmp/out" "$tmp/err"; rm -rf "$tmp"; fail "jobs=2 must refill the first completed slot"; }
+  [ "$rc" -eq 0 ] || { cat "$tmp/out" "$tmp/err"; fail "jobs=2 must refill the first completed slot"; }
   begin_n=$(grep -c '^FM_TEST_BEGIN ' "$tmp/out" || true)
   end_n=$(grep -c '^FM_TEST_END ' "$tmp/out" || true)
   [ "$begin_n" -eq 3 ] || fail "expected 3 BEGIN markers, got $begin_n"
@@ -579,7 +572,7 @@ doc=json.load(open(sys.argv[1]))
 assert doc["summary"]["total"]==3
 assert doc["summary"]["failed"]==0
 assert "jobs=2" in doc["selection"]
-' "$tmp/timing.json" || { rm -rf "$tmp"; fail "jobs JSON artifact wrong"; }
+' "$tmp/timing.json" || fail "jobs JSON artifact wrong"
 
   # Non-proven path is refused before any worker starts (no race masking).
   cat >"$tmp/fail.test.sh" <<'SH'
@@ -606,9 +599,9 @@ SH
   SCHED_EVIDENCE="$evidence" "$runner" --jobs 2 "$a" "$b" >"$tmp/out4" 2>"$tmp/err4"
   rc=$?
   set -e
-  [ "$rc" -ne 0 ] || { rm -rf "$tmp"; fail "jobs aggregate must be non-zero when a proven worker fails"; }
+  [ "$rc" -ne 0 ] || fail "jobs aggregate must be non-zero when a proven worker fails"
   grep -q 'FM_TEST_SUMMARY total=2 failed=1' "$tmp/out4" \
-    || { rm -rf "$tmp"; fail "jobs failure summary wrong: $(grep FM_TEST_SUMMARY "$tmp/out4")"; }
+    || { fail "jobs failure summary wrong: $(grep FM_TEST_SUMMARY "$tmp/out4")"; }
 
   cat >"$repo/$d" <<'SH'
 #!/usr/bin/env bash
@@ -620,24 +613,23 @@ SH
   "$runner" --jobs 2 --fail-on-gate-skip 'herdr not found' "$d" >"$tmp/out5" 2>"$tmp/err5"
   rc=$?
   set -e
-  [ "$rc" -ne 0 ] || { rm -rf "$tmp"; fail "parallel stderr gate skip must hard-fail"; }
+  [ "$rc" -ne 0 ] || fail "parallel stderr gate skip must hard-fail"
   grep -q 'FM_TEST_SUMMARY total=1 failed=1' "$tmp/out5" \
-    || { rm -rf "$tmp"; fail "parallel stderr hard-fail summary wrong: $(grep FM_TEST_SUMMARY "$tmp/out5")"; }
+    || { fail "parallel stderr hard-fail summary wrong: $(grep FM_TEST_SUMMARY "$tmp/out5")"; }
 
   "$runner" --jobs 2 "$d" >"$tmp/out6" 2>"$tmp/err6" \
-    || { rm -rf "$tmp"; fail "ordinary parallel stderr gate skip must remain successful"; }
+    || fail "ordinary parallel stderr gate skip must remain successful"
   grep -Eq '^FM_TEST_END .+ exit=0 duration_ms=[0-9]+ gate_skip=true$' "$tmp/out6" \
-    || { rm -rf "$tmp"; fail "parallel stderr gate skip was not recorded"; }
+    || fail "parallel stderr gate skip was not recorded"
   grep -q 'FM_TEST_SUMMARY total=1 failed=0 skipped_gate=1' "$tmp/out6" \
-    || { rm -rf "$tmp"; fail "parallel stderr skip summary wrong: $(grep FM_TEST_SUMMARY "$tmp/out6")"; }
+    || { fail "parallel stderr skip summary wrong: $(grep FM_TEST_SUMMARY "$tmp/out6")"; }
 
-  rm -rf "$tmp"
   pass "jobs scheduler runs proven scripts; failure propagates; non-proven refused"
 }
 
 test_aggregate_json() {
   local tmp a b
-  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-aggjson.XXXXXX")
+  tmp=$(fm_test_tmproot fm-test-run-aggjson)
   cat >"$tmp/a.json" <<'JSON'
 {
   "run_id": "a",
@@ -672,8 +664,7 @@ assert doc["summary"]["total"]==3
 assert doc["summary"]["failed"]==1
 assert doc["summary"]["critical_path_duration_ms"]==2000
 assert len(doc["scripts"])==3
-' "$tmp/out.json" || { rm -rf "$tmp"; fail "aggregate JSON shape wrong"; }
-  rm -rf "$tmp"
+' "$tmp/out.json" || fail "aggregate JSON shape wrong"
   pass "aggregate-json merges lane timing artifacts"
 }
 
