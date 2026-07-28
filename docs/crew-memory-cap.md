@@ -8,6 +8,7 @@ An `hq` firstmate host hit a real OOM incident: a repo-wide pylint run inside on
 
 The fix is deliberately simple and scoped to that one failure mode: bound a single runaway crew to its own cgroup so it can never exhaust host memory.
 This is **not** an aggregate cap across every crew on the host - the incident was one crew going crazy, not many crews together exceeding a shared budget, so there is no slice-wide memory limit here, no host or ansible config, and no attempt to also bound CPU or other resources.
+A separate, coarser guard partially closes that aggregate gap: `bin/fm-spawn.sh` refuses a new ship/scout launch once too many crews are already live in the home - see docs/configuration.md "Concurrent crew admission cap" for the full contract. It bounds crew *count*, not the sum of their memory, and is resource hygiene rather than a verified fix for any specific incident.
 
 ## Mechanism
 

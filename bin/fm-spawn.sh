@@ -101,6 +101,11 @@
 #   (the persistent supervisor process itself) is not wrapped, though every
 #   crewmate IT spawns goes through this same fm-spawn.sh path and is capped
 #   identically. See docs/crew-memory-cap.md for the empirical verification.
+#   Concurrent admission cap: before a NEW ship/scout launch, refuses when
+#   this home's already-live crew count meets a configurable ceiling (default
+#   6), naming the live count, the cap, and the config/max-crew /
+#   FM_MAX_CREW override in its refusal. A --secondmate launch is exempt
+#   (persistent supervisor, not burst load).
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -165,6 +170,8 @@ unset _fm_spawn_help_arg
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-crew-admission-lib.sh
+. "$SCRIPT_DIR/fm-crew-admission-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
@@ -411,6 +418,9 @@ if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   exit 1
 fi
 SPAWN_TASK_LOCK_HELD=1
+if [ "$KIND" != secondmate ]; then
+  fm_crew_admission_check "$KIND" || exit 1
+fi
 PROJ=
 ARG3=
 FIRSTMATE_HOME=

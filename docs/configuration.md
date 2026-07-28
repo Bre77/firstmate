@@ -243,6 +243,19 @@ Malformed JSON, an empty or malformed rule/default array, an unverified harness,
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
+## Concurrent crew admission cap (config/max-crew / FM_MAX_CREW)
+
+Before launching a NEW ship or scout crew, `bin/fm-spawn.sh` (via `bin/fm-crew-admission-lib.sh`) counts this home's already-live ship/scout crews and refuses the launch once that count meets a configurable ceiling, so an operator queues the task instead of silently oversubscribing the host.
+This is resource hygiene, not a proven fix for any specific incident: `data/fm-crew-silent-deaths-w9/report.md` found several unrelated crews going silent in the same instant with no per-crew OOM-kill signature, and the strongest concrete lead was a burst of concurrent launches against the per-crew memory cap's acknowledged aggregate gap (`docs/crew-memory-cap.md`), but causation was never proven; the captain's ruling (`data/fm-crew-silent-deaths-w9/decision-concurrency-cap.md`) adopted the cap regardless, as prudence.
+A `--secondmate` launch is exempt and never counted: a secondmate AGENT is a persistent supervisor, not burst load, though every crewmate it goes on to spawn is counted and capped exactly like the primary's own.
+
+The ceiling resolves in this order: the `FM_MAX_CREW` environment variable for one spawn, then the first non-empty line of local gitignored `config/max-crew`, then a default of 6.
+That default is sized for a host with roughly 30GB RAM against this repo's own per-crew `MemoryHigh=8G` default (`docs/crew-memory-cap.md`) - six crews at their soft-throttle ceiling stays under host RAM with headroom for the OS and any secondmates, while still allowing real concurrency; raise or lower `config/max-crew` to match your own host's memory and typical crew size.
+Either source must be a positive integer; a malformed value is reported and the spawn refused rather than silently falling back to the default.
+"Already-live" counts every `state/*.meta` in this home whose `kind` is not `secondmate`: a meta with no `window` recorded yet (a spawn still mid-flight elsewhere) counts as live, and a meta with a recorded endpoint counts only when `fm_backend_target_exists` confirms it is still reachable.
+A refusal names the live count, the configured cap, and both override paths on stderr.
+This cap is local to each home (primary or secondmate) and is not part of secondmate inherited configuration - each home's own `config/max-crew` governs only the crews it spawns.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
