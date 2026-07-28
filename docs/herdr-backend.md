@@ -271,6 +271,7 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 ```sh
 tests/fm-backend-herdr.test.sh
 tests/fm-backend-herdr-smoke.test.sh
+tests/fm-backend-herdr-composer-live-smoke.test.sh
 tests/fm-backend-herdr-prune-safety-e2e.test.sh
 tests/fm-backend-herdr-respawn-idem-e2e.test.sh
 tests/fm-backend-herdr-workspace-per-home-e2e.test.sh
@@ -283,4 +284,5 @@ tests/fm-afk-pi-herdr-return-e2e.test.sh
 ```
 
 Real Herdr tests use the named lab helper and default-session tripwire.
+`tests/fm-backend-herdr-composer-live-smoke.test.sh` drives composer-state classification and submit confirmation against a real pane and a real `agent get`/`pane report-agent` round trip, catching a fixture-invisible drift in `pane read --format ansi` byte shape or `agent get` JSON shape on a Herdr upgrade.
 [`verification/runtime-backends.md`](verification/runtime-backends.md#herdr) records the active version, CLI, projection, event, and lifecycle evidence without task-specific chronology.
