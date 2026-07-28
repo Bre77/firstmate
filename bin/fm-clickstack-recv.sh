@@ -7,13 +7,15 @@
 # never touches the watcher, the watcher's lock, or state/.last-watcher-beat, so
 # it cannot interfere with the supervision backbone (see docs/clickstack-webhook.md).
 #
-# Two independent, independently-gated integrations share this one process and
-# port: ClickStack alerts (config/clickstack-webhook.env) and BetterStack
-# status-page webhooks (config/betterstack-webhook.env; docs/betterstack-webhook.md).
-# They share it because the reverse proxy forwards the whole host to one port, so
-# a second listener on a different port would be unreachable without an
-# out-of-repo proxy change; the listener dispatches by path and keeps each
-# integration's route 404 unless that integration's own gate is present.
+# Three independent, independently-gated integrations share this one process and
+# port: ClickStack alerts (config/clickstack-webhook.env), BetterStack
+# status-page webhooks (config/betterstack-webhook.env; docs/betterstack-webhook.md),
+# and Twilio RCS captain messaging replies (config/captain-msg.env;
+# docs/captain-messaging.md). They share it because the reverse proxy forwards
+# the whole host to one port, so a second listener on a different port would be
+# unreachable without an out-of-repo proxy change; the listener dispatches by
+# path and keeps each integration's route 404 unless that integration's own
+# gate is present.
 #
 # Subcommands:
 #   serve   (default) acquire the singleton and run the listener in the foreground
@@ -36,12 +38,15 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-clickstack-lib.sh"
 # shellcheck source=bin/fm-betterstack-lib.sh
 . "$SCRIPT_DIR/fm-betterstack-lib.sh"
+# shellcheck source=bin/fm-captain-msg-lib.sh
+. "$SCRIPT_DIR/fm-captain-msg-lib.sh"
 
 LISTENER="$SCRIPT_DIR/fm-clickstack-listener.py"
 LOCK=$(cshook_lock_dir)
 READY=$(cshook_ready_file)
 INBOX=$(cshook_inbox_dir)
 BS_INBOX=$(bshook_inbox_dir)
+CM_INBOX=$(cmsg_inbox_dir)
 
 lock_pid() { cat "$LOCK/pid" 2>/dev/null || true; }
 
@@ -78,20 +83,41 @@ cmd_status() {
 }
 
 cmd_serve() {
-  local cs_on=0 bs_on=0
+  local cs_on=0 bs_on=0 cm_on=0 cm_auth_token=""
   cshook_enabled && cs_on=1
   bshook_enabled && bs_on=1
-  { [ "$cs_on" = 1 ] || [ "$bs_on" = 1 ]; } || exit 0
+  cmsg_enabled && cm_on=1
+  { [ "$cs_on" = 1 ] || [ "$bs_on" = 1 ] || [ "$cm_on" = 1 ]; } || exit 0
 
   # Port/bind stay owned by the ClickStack gate (or its defaults) even when only
-  # BetterStack is enabled: BetterStack has no port/bind config of its own, since
-  # it always rides the one shared, proxy-fronted port.
+  # BetterStack or captain-msg is enabled: neither has port/bind config of its
+  # own, since both always ride the one shared, proxy-fronted port.
   cshook_load_config
   bshook_load_config
+  # Always resolved (not just when cm_on=1) so CAPTAIN_MSG_WEBHOOK_URL/
+  # CAPTAIN_MSG_DESTINATION are defined under `set -u` below even when captain
+  # messaging is off; cmsg_load_config alone never fails (see fm-captain-msg-lib.sh).
+  cmsg_load_config
 
   if ! command -v python3 >/dev/null 2>&1; then
     echo "clickstack receiver: FAILED - python3 not found" >&2
     exit 1
+  fi
+
+  if [ "$cm_on" = 1 ]; then
+    if ! cmsg_require_config; then
+      echo "clickstack receiver: FAILED - config/captain-msg.env is incomplete" >&2
+      exit 1
+    fi
+    # Fetched fresh on every serve start (never cached to disk) so a rotated
+    # Twilio Account Auth Token reaches the listener on the next restart
+    # without any separate token-refresh mechanism. Twilio always signs
+    # inbound webhooks with the Account Auth Token, never the Restricted API
+    # Key used for outbound sends - see fm-captain-msg-lib.sh.
+    if ! cm_auth_token=$(cmsg_fetch_auth_token); then
+      echo "clickstack receiver: FAILED - could not read the Twilio Account Auth Token from 1Password" >&2
+      exit 1
+    fi
   fi
 
   if ! fm_lock_try_acquire "$LOCK"; then
@@ -118,6 +144,7 @@ cmd_serve() {
   rm -f "$READY" 2>/dev/null || true
   mkdir -p "$INBOX" 2>/dev/null || true
   if [ "$bs_on" = 1 ]; then mkdir -p "$BS_INBOX" 2>/dev/null || true; fi
+  if [ "$cm_on" = 1 ]; then mkdir -p "$CM_INBOX" 2>/dev/null || true; fi
 
   CSHOOK_BIND="$CSHOOK_BIND" \
   CSHOOK_PORT="$CSHOOK_PORT" \
@@ -129,6 +156,11 @@ cmd_serve() {
   BSHOOK_ENABLED="$bs_on" \
   BSHOOK_TOKEN="$BSHOOK_TOKEN" \
   BSHOOK_INBOX="$BS_INBOX" \
+  CMHOOK_ENABLED="$cm_on" \
+  CMHOOK_AUTH_TOKEN="$cm_auth_token" \
+  CMHOOK_WEBHOOK_URL="$CAPTAIN_MSG_WEBHOOK_URL" \
+  CMHOOK_FROM="$CAPTAIN_MSG_DESTINATION" \
+  CMHOOK_INBOX="$CM_INBOX" \
     python3 "$LISTENER" &
   child=$!
   wait "$child"

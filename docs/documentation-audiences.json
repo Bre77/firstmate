@@ -128,6 +128,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/captain-msg-response/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/clickstack-alert-response/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -216,6 +220,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/captain-messaging.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/cd-guard.md",
       "audience": "maintainer-architecture"
     },
@@ -249,6 +257,10 @@
     },
     {
       "path": "docs/examples/betterstack-webhook.env",
+      "audience": "operator-example"
+    },
+    {
+      "path": "docs/examples/captain-msg.env",
       "audience": "operator-example"
     },
     {

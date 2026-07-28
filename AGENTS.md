@@ -487,6 +487,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `firstmate-coding-guidelines` - load before changing firstmate's shared, tracked material, as defined by section 1's list, whether editing directly or briefing a crewmate for a firstmate-repo task.
 - `clickstack-alert-response` - load on a `check:` wake whose output names a `clickstack-alert` to triage the ClickStack webhook alert payloads in `state/clickstack-inbox/` and act; fork-only, relevant only when the ClickStack webhook receiver is enabled (`docs/clickstack-webhook.md`).
 - `betterstack-alert-response` - load on a `check:` wake whose output names a `betterstack-alert` to triage the BetterStack status-page webhook event payloads in `state/betterstack-inbox/` and act; fork-only, relevant only when the BetterStack webhook route is enabled (`docs/betterstack-webhook.md`).
+- `captain-msg-response` - load on a `check:` wake whose output names `captain-msg` to triage inbound Twilio RCS reply payloads in `state/captain-msg-inbox/` and act; fork-only, relevant only when the captain messaging channel is enabled (`docs/captain-messaging.md`).
 
 ## 14. X mode
 

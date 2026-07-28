@@ -13,11 +13,13 @@
 #   clickstack receiver: healthy pid=<N> (already listening)
 #   clickstack receiver: FAILED - could not confirm a listening receiver
 # On started/healthy it exits zero (after blocking on the child for started); on
-# FAILED it exits non-zero. Inert by default: with NEITHER gate (ClickStack's
-# config/clickstack-webhook.env or BetterStack's config/betterstack-webhook.env;
-# see docs/betterstack-webhook.md) it exits 0 silently. A config change to
-# either gate needs a `--restart` to take effect, since the listener reads its
-# config once at process start (bin/fm-betterstack-arm.sh does this for you).
+# FAILED it exits non-zero. Inert by default: with NONE of the three gates
+# (ClickStack's config/clickstack-webhook.env, BetterStack's
+# config/betterstack-webhook.env, or captain messaging's config/captain-msg.env;
+# see docs/betterstack-webhook.md and docs/captain-messaging.md) it exits 0
+# silently. A config change to any gate needs a `--restart` to take effect,
+# since the listener reads its config once at process start
+# (bin/fm-betterstack-arm.sh and bin/fm-captain-msg-arm.sh do this for you).
 #
 # --stop / --restart are home-scoped: they act only on the pid recorded in THIS
 # home's state/.clickstack-recv.lock, never a broad pkill that would hit sibling
@@ -36,6 +38,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-clickstack-lib.sh"
 # shellcheck source=bin/fm-betterstack-lib.sh
 . "$SCRIPT_DIR/fm-betterstack-lib.sh"
+# shellcheck source=bin/fm-captain-msg-lib.sh
+. "$SCRIPT_DIR/fm-captain-msg-lib.sh"
 
 RECV="$SCRIPT_DIR/fm-clickstack-recv.sh"
 LOCK=$(cshook_lock_dir)
@@ -66,8 +70,8 @@ case "${1:-}" in
   *) echo "usage: $(basename "$0") [--restart|--stop]" >&2; exit 2 ;;
 esac
 
-# Inert unless opted in to at least one of the two integrations.
-{ cshook_enabled || bshook_enabled; } || exit 0
+# Inert unless opted in to at least one of the three integrations.
+{ cshook_enabled || bshook_enabled || cmsg_enabled; } || exit 0
 
 if [ "$mode" = restart ]; then
   "$RECV" stop >/dev/null 2>&1 || true

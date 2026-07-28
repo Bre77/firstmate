@@ -77,6 +77,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-send.sh`             | Send one verified literal line or supported key through the target's recorded backend |
 | `fm-tmux-lib.sh`         | Shared tmux pane primitives for busy detection, composer capture, and verified submit |
 | `fm-notify-captain.sh`   | Page the captain's phone through Better Stack on-call (fork-only); tier maps to the incident's notification channels, `--resolve` closes the incident afterwards, secrets come from 1Password at runtime, `--dry-run` previews with secrets redacted |
+| `fm-captain-msg.sh`      | Send one message to the captain over Twilio RCS for Business (fork-only); enforces the speech contract (plain text, no URLs/markdown, <=300 chars), secrets come from 1Password at runtime; see `docs/captain-messaging.md` |
 | `fm-peek.sh`             | Print a bounded tail of a crewmate endpoint                                          |
 | `fm-check-register.sh`   | Bind an intentional custom watcher check to its current bytes                       |
 | `fm-check-lib.sh`        | Validate custom-check registrations and prepare private execution snapshots          |
