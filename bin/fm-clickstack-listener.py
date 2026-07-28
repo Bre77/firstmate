@@ -9,18 +9,22 @@ enqueuing through the existing durable wake queue. Because the only per-request
 work is a fast local atomic file write, a slow or absent supervisor can never
 block or delay a webhook sender's delivery.
 
-Two independent integrations share this one process and port:
-  - ClickStack alerts, on any path other than /betterstack (the original,
-    unchanged behavior; see docs/clickstack-webhook.md).
+Three independent integrations share this one process and port:
+  - ClickStack alerts, on any path other than /betterstack or /captain-msg (the
+    original, unchanged behavior; see docs/clickstack-webhook.md).
   - BetterStack status-page subscription webhooks, on /betterstack only, with a
     URL-query token instead of a header (BetterStack subscriptions cannot send
     custom headers; see docs/betterstack-webhook.md).
+  - Twilio RCS for Business inbound replies (the captain messaging channel), on
+    /captain-msg only, authenticated by Twilio's signed-request contract
+    (X-Twilio-Signature, HMAC-SHA1 over the exact webhook URL) instead of a
+    shared secret; see docs/captain-messaging.md.
 They share the process because the captain's reverse proxy forwards the whole
 host to one port, so a second listener on a different port would be unreachable
 without an out-of-repo proxy change. Each integration is independently gated by
-its own CSHOOK_ENABLED / BSHOOK_ENABLED flag, set by the launcher from its own
-gate file's presence (bin/fm-clickstack-recv.sh); a disabled integration's route
-answers 404 regardless of the other's state.
+its own CSHOOK_ENABLED / BSHOOK_ENABLED / CMHOOK_ENABLED flag, set by the
+launcher from its own gate file's presence (bin/fm-clickstack-recv.sh); a
+disabled integration's route answers 404 regardless of the other two's state.
 
 Language choice (justified in the PR): Python 3 stdlib http.server with
 ThreadingHTTPServer. It is a robust, zero-dependency long-running daemon - no
@@ -41,8 +45,24 @@ Config is passed in by the launcher (bin/fm-clickstack-recv.sh) via environment:
   BSHOOK_ENABLED         "1" iff the BetterStack gate is present (default "0")
   BSHOOK_TOKEN           required token for the /betterstack route; empty rejects all
   BSHOOK_INBOX           inbox directory for accepted BetterStack payloads
+  CMHOOK_ENABLED         "1" iff the captain-msg gate is present (default "0")
+  CMHOOK_AUTH_TOKEN      Twilio Account Auth Token used to validate
+                         X-Twilio-Signature; empty rejects all
+  CMHOOK_WEBHOOK_URL     the exact public HTTPS URL Twilio POSTs to (must match
+                         the Twilio console webhook URL byte-for-byte; signature
+                         validation is computed over this URL, not the loopback
+                         request line)
+  CMHOOK_FROM            expected captain phone number in plain E.164 (no
+                         channel prefix); an inbound request's Twilio "From"
+                         (channel-prefixed, e.g. "rcs:+<E.164>") has that
+                         prefix stripped before comparison, and is rejected
+                         when it still does not match
+                         even with a valid signature (empty skips this check)
+  CMHOOK_INBOX           inbox directory for accepted captain-msg replies
 """
 
+import base64
+import hashlib
 import hmac
 import json
 import os
@@ -53,7 +73,7 @@ import threading
 import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qsl, parse_qs, urlparse
 
 BIND = os.environ.get("CSHOOK_BIND", "0.0.0.0")
 try:
@@ -74,6 +94,13 @@ BSHOOK_ENABLED = os.environ.get("BSHOOK_ENABLED", "0") == "1"
 BSHOOK_TOKEN = os.environ.get("BSHOOK_TOKEN", "")
 BSHOOK_INBOX = os.environ.get("BSHOOK_INBOX", "")
 BSHOOK_ROUTE_PATH = "/betterstack"
+
+CMHOOK_ENABLED = os.environ.get("CMHOOK_ENABLED", "0") == "1"
+CMHOOK_AUTH_TOKEN = os.environ.get("CMHOOK_AUTH_TOKEN", "")
+CMHOOK_WEBHOOK_URL = os.environ.get("CMHOOK_WEBHOOK_URL", "")
+CMHOOK_FROM = os.environ.get("CMHOOK_FROM", "")
+CMHOOK_INBOX = os.environ.get("CMHOOK_INBOX", "")
+CMHOOK_ROUTE_PATH = "/captain-msg"
 
 # Candidate identifier fields, in priority order. When a webhook carries one, the
 # inbox filename is derived from it so a ClickStack redelivery of the same alert
@@ -178,10 +205,38 @@ def _betterstack_inbox_name(raw, seq):
     return "event-%d-%06d.json" % (time.time_ns(), seq)
 
 
-def _write_inbox(inbox_dir, raw_bytes, name_fn):
-    """Atomically persist the raw payload to inbox_dir; return the basename."""
-    seq = _next_seq()
-    name = name_fn(raw_bytes.decode("utf-8", "replace"), seq)
+def _twilio_signature_valid(url, form, signature, auth_token):
+    """Twilio's own signed-request algorithm (see the incoming-message webhook
+    reference docs/captain-messaging.md links to): HMAC-SHA1, keyed by the
+    Account Auth Token, over the exact webhook URL with every POST parameter
+    (sorted by key, no delimiters) appended directly to it. This is what
+    twilio-python's RequestValidator computes; it is reimplemented here in
+    stdlib only, because this daemon has no package manager or vendored
+    dependencies (see the module docstring)."""
+    if not auth_token or not signature or not url:
+        return False
+    s = url
+    for key in sorted(form.keys()):
+        s += key + form[key]
+    digest = hmac.new(auth_token.encode("utf-8"), s.encode("utf-8"), hashlib.sha1).digest()
+    computed = base64.b64encode(digest).decode("utf-8")
+    return hmac.compare_digest(computed, signature)
+
+
+def _derive_captain_msg_id(form):
+    sid = form.get("MessageSid") or form.get("SmsMessageSid") or form.get("SmsSid")
+    return _slug(sid) if sid else ""
+
+
+def _captain_msg_inbox_name(form, seq):
+    stem = _derive_captain_msg_id(form)
+    if stem:
+        return "message-%s.json" % stem
+    return "message-%d-%06d.json" % (time.time_ns(), seq)
+
+
+def _atomic_write(inbox_dir, name, raw_bytes, seq):
+    """Atomically persist raw_bytes as inbox_dir/name; return the basename."""
     final = os.path.join(inbox_dir, name)
     tmp = "%s.tmp.%d.%d.%s" % (final, os.getpid(), seq, os.urandom(4).hex())
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -192,6 +247,27 @@ def _write_inbox(inbox_dir, raw_bytes, name_fn):
         os.close(fd)
     os.replace(tmp, final)  # atomic; a same-id redelivery overwrites in place
     return name
+
+
+def _write_inbox(inbox_dir, raw_bytes, name_fn):
+    """Atomically persist the raw payload to inbox_dir; return the basename."""
+    seq = _next_seq()
+    name = name_fn(raw_bytes.decode("utf-8", "replace"), seq)
+    return _atomic_write(inbox_dir, name, raw_bytes, seq)
+
+
+def _write_captain_msg_inbox(inbox_dir, form):
+    """Atomically persist a normalized JSON envelope for one validated inbound
+    Twilio RCS reply; return the basename. form is a str->str dict of every
+    POST parameter Twilio sent (already signature-validated by the caller)."""
+    seq = _next_seq()
+    name = _captain_msg_inbox_name(form, seq)
+    envelope = {
+        "received_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "params": form,
+    }
+    raw_bytes = json.dumps(envelope, sort_keys=True).encode("utf-8")
+    return _atomic_write(inbox_dir, name, raw_bytes, seq)
 
 
 def _secret_ok(handler):
@@ -236,6 +312,17 @@ class Handler(BaseHTTPRequestHandler):
         except BrokenPipeError:
             pass
 
+    def _reply_twiml(self, status, xml_body):
+        body = xml_body.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/xml")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except BrokenPipeError:
+            pass
+
     def do_GET(self):
         # Liveness probe used by the launcher/arm to confirm the port is serving.
         path = urlparse(self.path).path
@@ -267,6 +354,8 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path in (BSHOOK_ROUTE_PATH, BSHOOK_ROUTE_PATH + "/"):
             self._handle_betterstack()
+        elif path in (CMHOOK_ROUTE_PATH, CMHOOK_ROUTE_PATH + "/"):
+            self._handle_captain_msg()
         else:
             self._handle_clickstack()
 
@@ -316,6 +405,46 @@ class Handler(BaseHTTPRequestHandler):
         # on" semantics.
         self._reply(HTTPStatus.ACCEPTED, {"status": "accepted", "inbox": name})
 
+    def _handle_captain_msg(self):
+        if not CMHOOK_ENABLED:
+            self._reply(HTTPStatus.NOT_FOUND, {"error": "not found"})
+            return
+        raw = self._read_body()
+        if raw is None:
+            return
+        form = dict(parse_qsl(raw.decode("utf-8", "replace"), keep_blank_values=True))
+        signature = self.headers.get("X-Twilio-Signature", "")
+        if not _twilio_signature_valid(CMHOOK_WEBHOOK_URL, form, signature, CMHOOK_AUTH_TOKEN):
+            # A generic 403 tells the sender nothing about why; the specific
+            # reason is logged locally only, so a misconfiguration (wrong
+            # webhook URL, stale auth token) stays diagnosable without leaking
+            # validation details to a would-be forger.
+            self.log_error("captain-msg: rejected - invalid or missing X-Twilio-Signature")
+            self._reply(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+            return
+        # Twilio's RCS "From" is channel-prefixed ("rcs:+<E.164>"), confirmed
+        # against a live account; CMHOOK_FROM is configured as a plain E.164
+        # number, so strip the channel prefix before comparing.
+        inbound_from = form.get("From", "")
+        if inbound_from.startswith("rcs:"):
+            inbound_from = inbound_from[len("rcs:"):]
+        if CMHOOK_FROM and inbound_from != CMHOOK_FROM:
+            self.log_error("captain-msg: rejected - From did not match the configured captain number")
+            self._reply(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+            return
+        try:
+            name = _write_captain_msg_inbox(CMHOOK_INBOX, form)
+        except OSError as exc:
+            # Same durability requirement as the other two routes: never ack a
+            # reply we did not persist.
+            self.log_error("inbox write failed: %s", exc)
+            self._reply(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "cannot persist payload"})
+            return
+        # Twilio's incoming-message webhook expects a TwiML response; empty
+        # <Response></Response> means "no immediate reply" - correct here,
+        # since the reply is handled later and asynchronously by firstmate.
+        self._reply_twiml(HTTPStatus.OK, "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response></Response>")
+
     def log_message(self, fmt, *args):
         # Quiet by default; the daemon's stdout/stderr is captured by the arm.
         sys.stderr.write("clickstack-listener: " + (fmt % args) + "\n")
@@ -346,6 +475,11 @@ def main():
             sys.stderr.write("clickstack-listener: BSHOOK_INBOX not set\n")
             return 2
         os.makedirs(BSHOOK_INBOX, exist_ok=True)
+    if CMHOOK_ENABLED:
+        if not CMHOOK_INBOX:
+            sys.stderr.write("clickstack-listener: CMHOOK_INBOX not set\n")
+            return 2
+        os.makedirs(CMHOOK_INBOX, exist_ok=True)
     try:
         httpd = ThreadingHTTPServer((BIND, PORT), Handler)
     except OSError as exc:
