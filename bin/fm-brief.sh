@@ -426,7 +426,8 @@ Do NOT run /no-mistakes - that path validates and opens a PR against the upstrea
 The task is complete only when committed on your branch \`fm/$ID\`.
 When it is implemented and committed, deliver it with:
 \`$FM_ROOT/bin/fm-fork-deliver.sh --title "<pr title>" --body-file <path>\`
-That runs the local quality gate (the fork has no CI), pushes your branch to the fork, and opens a PR into the fork main branch.
+That runs a local quality gate, pushes your branch to the fork, and opens a PR into the fork main branch.
+The fork PR then runs its own checks (lint, portable behavior-test suites, stock-macOS-Bash snapshot compatibility); a red check blocks folding.
 Append \`done: PR {url}\` with the URL it prints and stop.
 The captain reviews and firstmate folds the fork PR; do not merge it yourself.
 EOF

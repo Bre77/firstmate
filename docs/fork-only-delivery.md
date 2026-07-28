@@ -10,7 +10,7 @@ This note explains when to use fork-only delivery, why the default no-mistakes p
 | --- | --- | --- |
 | Intended home | `kunchenguid/firstmate:main` (shared with every user) | `Bre77/firstmate:main` (this fork only) |
 | Use for | Anything generalizable to every firstmate user | Changes that only make sense for this fork and are never upstreamed |
-| Validation | The no-mistakes pipeline (review, test, lint, CI) | The local quality gate (`bin/fm-fork-deliver.sh`), because the fork runs no CI |
+| Validation | The no-mistakes pipeline (review, test, lint, CI) | The local quality gate (`bin/fm-fork-deliver.sh`) before delivery, plus the fork's own PR checks after |
 | PR base | `kunchenguid/firstmate:main` | `Bre77/firstmate:main` |
 | Landing | Captain merges the upstream PR | Firstmate folds the fork PR |
 | Scaffold | `bin/fm-brief.sh <id> <repo>` (registered mode) | `bin/fm-brief.sh <id> <repo> --fork-only` |
@@ -32,14 +32,15 @@ Fork-only delivery therefore stays entirely off the no-mistakes bare repo and va
 
 ## The local quality gate
 
-The fork (`Bre77/firstmate`) runs no CI, so local validation is the only gate before a fork PR lands.
-`bin/fm-fork-deliver.sh` runs that gate by default as a mirror of `.github/workflows/ci.yml` (the `lint` and `tests` jobs):
+`bin/fm-fork-deliver.sh` runs a local gate before pushing, as a mirror of `.github/workflows/ci.yml` (the `lint` and `tests` jobs):
 
 1. `shellcheck` over the shell scripts that exist (`bin/*.sh`, `bin/backends/*.sh`, `tests/*.sh`).
 2. Each `tests/*.test.sh` behavior test (needs `tmux` on PATH, as CI does).
 
 Keep the default gate in sync with that workflow.
 Pass `--check '<command>'` to substitute a different gate for a non-firstmate repo, or `--skip-validate` when validation was already run separately.
+Once the branch is pushed, the fork's own `.github/workflows/ci.yml` runs the real PR checks: the lint job, the portable behavior-test suites, and the stock-macOS-Bash snapshot compatibility check.
+A red check on the fork PR blocks folding the same as it would on an upstream PR.
 
 ## Running it
 
