@@ -424,6 +424,25 @@ EOF
   pass "raw-byte parser accepts canonical URLs and rejects the complete adversarial matrix"
 }
 
+test_label_name_resolution() {
+  local dir
+  dir=$(fm_test_tmproot fm-pr-label-name)/config
+  mkdir -p "$dir"
+
+  [ "$(fm_pr_label_name "$dir")" = fm ] || fail "label-name: absent config/pr-label must default to 'fm'"
+
+  printf '\n' > "$dir/pr-label"
+  [ "$(fm_pr_label_name "$dir")" = fm ] || fail "label-name: a blank config/pr-label must default to 'fm'"
+
+  printf '  crewmate-pr  \n' > "$dir/pr-label"
+  [ "$(fm_pr_label_name "$dir")" = crewmate-pr ] || fail "label-name: surrounding whitespace must be trimmed"
+
+  printf '# a comment\n\nteam-fleet\n' > "$dir/pr-label"
+  [ "$(fm_pr_label_name "$dir")" = team-fleet ] || fail "label-name: comment and blank lines must be skipped"
+
+  pass "fm_pr_label_name defaults to 'fm', trims whitespace, and skips comment/blank lines"
+}
+
 test_invalid_entrypoints_have_zero_side_effects() {
   local dir before after value rc
   dir=$(make_case invalid-entrypoints)
@@ -3322,6 +3341,7 @@ test_gitlab_merged_poll_retires() {
 }
 
 test_parser_matrix
+test_label_name_resolution
 test_gitlab_merge_watch
 test_merged_poll_retires_once
 test_persistent_secondmate_retirement_is_poll_only

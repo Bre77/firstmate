@@ -184,6 +184,11 @@ Its broader dark-TRUECOLOR placeholder handling and dark-theme tradeoff are docu
 That styled capture is internal to the boolean detector only.
 `fm-peek` and every other human or LLM-facing capture path stays plain `tmux capture-pane` with no escape codes.
 
+**Commit co-author trailer (verified 2026-07-29, Claude Code 2.1.220).**
+Claude Code's own git-commit workflow guidance injects a `Co-Authored-By: Claude ... <noreply@anthropic.com>` trailer, which conflicts with the captain's no-agent-co-author convention (AGENTS.md section 1).
+The settings schema exposes `attribution.commit` (string; empty string omits the trailer entirely), confirmed both from the installed binary's settings schema and empirically: a real commit drafted by a fresh crewmate-shaped launch (`claude --dangerously-skip-permissions "<prompt>"`, no dictated message) carried the trailer without the flag and omitted it with `--settings '{"attribution":{"commit":""}}'`.
+`bin/fm-spawn.sh` passes that flag on every claude crewmate/secondmate launch, the same per-launch scoping pattern as `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false` above; it never touches the captain's global `~/.claude/settings.json`.
+
 **Primary-session guard fact (verified 2026-07-04, Claude Code 2.1.201; preserved 2026-07-08, Claude Code 2.1.204; Stop-owned auto-arm revalidated 2026-07-24, Claude Code 2.1.219).**
 This is separate from the per-task crewmate turn-end hook above (that one just `touch`es a marker file in a task's own `.claude/settings.local.json`).
 The firstmate PRIMARY's own `.claude/settings.json` registers two Stop hooks: `bin/fm-turnend-guard.sh --claude` and the Stop-owned auto-arm `bin/fm-claude-stop-autoarm.sh` (`asyncRewake: true`, `timeout: 28800`), and exiting the guard with status 2 plus stderr reliably forces the model to continue.
@@ -223,6 +228,10 @@ The tracked hook anchors to `pwd -P`, verifies that root is firstmate-shaped and
 Codex's primary watcher protocol is `bin/fm-watch-checkpoint.sh --seconds "${FM_CODEX_WATCH_CHECKPOINT:-180}"`, not `bin/fm-watch-arm.sh`.
 The checkpoint is deliberately foreground and bounded so Codex regains control regularly to process user messages and queued wakes.
 
+**Commit co-author trailer: no action needed (verified 2026-07-29, codex-cli 0.145.0).**
+The binary contains a leftover literal `Co-authored-by: Codex <noreply@openai.com>` string tied to a `codex_git_commit` feature flag, but `codex features list` reports that flag `removed`/`false`, and a real `codex exec --dangerously-bypass-approvals-and-sandbox` commit (self-drafted message, no dictated text) carried no trailer even with `-c features.codex_git_commit=true` forced.
+Dead code, not live behavior; no `fm-spawn.sh` change made for codex.
+
 ## opencode (VERIFIED 2026-06-11, v1.15.7-1.17.6; 1.18.4 busy-queue re-verified 2026-07-20)
 
 | Fact | Value |
@@ -259,6 +268,14 @@ The firstmate PRIMARY's own `.opencode/plugins/fm-primary-turnend-guard.js` list
 Throwing from `session.idle` does not block `opencode run`, so the primary adapter treats the event as passive and uses `client.session.promptAsync` to force one follow-up turn when `bin/fm-turnend-guard.sh` returns 2.
 The companion `.opencode/plugins/fm-primary-watch-arm.js` owns normal TUI watcher wake supervision and coordinates with the guard plugin before the guard tries a blind-turn follow-up.
 The follow-up was verified in the interactive TUI; `opencode run` can exit before displaying a queued follow-up, so the adapter is fail-open in headless mode.
+
+**Commit co-author trailer: no action needed (checked 2026-07-29, opencode-ai 1.18.9).**
+The only `Co-authored-by:` trailer logic in the bundled binary lives in the `opencode github` GitHub-Actions-bot subcommand (a distinct feature firstmate never invokes); no such logic exists in the plain interactive path `fm-spawn.sh` actually launches (`opencode --prompt`).
+No `fm-spawn.sh` change made for opencode.
+
+**Commit co-author trailer: pi, grok, and kimi are unverified (2026-07-29).**
+None of the three were installed in the environment used to check claude/codex/opencode, so no empirical or code-level evidence was gathered either way; no speculative config was added for any of them.
+Check the same way (installed binary strings for a trailer-shaped literal, then a real self-drafted commit with a fresh crewmate-shaped launch) before concluding either way.
 
 ## pi (VERIFIED 2026-06-11)
 

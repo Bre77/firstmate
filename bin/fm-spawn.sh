@@ -454,7 +454,13 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # --settings '{"attribution":{"commit":""}}' empties claude's own injected
+    # "Co-Authored-By: Claude ... <noreply@anthropic.com>" commit trailer
+    # (verified: settings schema attribution.commit, empirically confirmed
+    # against a real commit with and without the flag). Scoped to this one
+    # launch via the CLI flag, same as the prompt-suggestion env var above;
+    # never touches the captain's global ~/.claude/settings.json.
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions --settings '\''{"attribution":{"commit":""}}'\'' __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'

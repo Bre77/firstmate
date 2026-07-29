@@ -940,3 +940,43 @@ fm_pr_poll_retirement_recover_all() {
   done
   [ -z "$FM_PR_POLL_RETIREMENT_REJECTED" ]
 }
+
+# Print the configured PR label name: the first non-empty, non-comment,
+# whitespace-trimmed line of config/pr-label under the given config dir, or
+# "fm" when absent/blank. This is the fleet-provenance marker AGENTS.md
+# section 1 uses instead of commit-identity provenance.
+fm_pr_label_name() {
+  local config_dir=$1 line
+  if [ -f "$config_dir/pr-label" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      line="${line#"${line%%[![:space:]]*}"}"
+      line="${line%"${line##*[![:space:]]}"}"
+      [ -n "$line" ] || continue
+      case "$line" in '#'*) continue ;; esac
+      printf '%s' "$line"
+      return 0
+    done < "$config_dir/pr-label"
+  fi
+  printf '%s' fm
+}
+
+# Best-effort: create the label in the target repo if it is absent, then apply
+# it to the PR. GitHub only today (gh label/pr edit); GitLab is a no-op because
+# no glab label syntax is verified yet. Never fails the caller - a repo that
+# refuses label creation, already has the label, or has no gh on PATH only
+# warns to stderr, since losing the PR over a labelling failure is worse than
+# an unlabelled PR.
+fm_pr_apply_label() {
+  local provider=$1 repo=$2 url=$3 label=$4
+  [ -n "$label" ] || return 0
+  [ "$provider" = github ] || return 0
+  if ! command -v gh >/dev/null 2>&1; then
+    echo "warn: gh not found; could not apply PR label '$label' to $url" >&2
+    return 0
+  fi
+  gh label create "$label" --repo "$repo" --color 6f42c1 \
+    --description "Opened by a Firstmate crewmate" >/dev/null 2>&1 || true
+  gh pr edit "$url" --add-label "$label" >/dev/null 2>&1 \
+    || echo "warn: could not apply PR label '$label' to $url" >&2
+  return 0
+}
