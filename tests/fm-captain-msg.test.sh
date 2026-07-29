@@ -3,8 +3,11 @@
 # Business: the speech contract and config resolution (fm-captain-msg-lib.sh),
 # the send tool (fm-captain-msg.sh, with op/curl mocked - no live Twilio calls),
 # the shared listener's /captain-msg path (fm-clickstack-listener.py via
-# fm-clickstack-recv.sh, including real Twilio signature validation), the inbox
-# poll shim (fm-captain-msg-poll.sh), and bootstrap's config-gate activation.
+# fm-clickstack-recv.sh, including real Twilio signature validation), the shared
+# signature module (fm_twilio_sig.py) and its standalone verifier CLI
+# (fm-twilio-sig-verify.py), the inbox poll shim (fm-captain-msg-poll.sh,
+# including its router-relayed-payload validate/normalize/quarantine path), and
+# bootstrap's config-gate activation.
 #
 # The route shares the ClickStack/BetterStack receiver's single HTTP listener
 # process and port (docs/captain-messaging.md), so it must stay INERT by default
@@ -628,6 +631,73 @@ test_recv_serve_fetches_auth_token_from_1password_and_serves_route() {
   pass "fm-clickstack-recv.sh fetches the Twilio Account Auth Token from 1Password (mocked) and serves a working /captain-msg route"
 }
 
+# --- fm-twilio-sig-verify.py: the shared HMAC-SHA1 validator, exercised
+# directly (fm-clickstack-listener.py's own /captain-msg route above already
+# exercises the SAME implementation from the direct-webhook side; this proves
+# the extracted module works standalone against a STORED payload, the shape
+# the alert-router relays per Teslemetry/tools PR 26) -------------------------
+
+VERIFY="$ROOT/bin/fm-twilio-sig-verify.py"
+
+# router_envelope <url> <token> <body>: print a {"url","signature","body"}
+# envelope with the correctly-computed Twilio signature, mirroring exactly
+# what the alert-router relays (Teslemetry/tools PR 26 "What's relayed").
+router_envelope() {
+  PATH="$BASE_PATH" python3 -c '
+import sys, json
+sys.path.insert(0, sys.argv[4])
+from fm_twilio_sig import parse_form
+import hmac, hashlib, base64
+url, token, body = sys.argv[1], sys.argv[2], sys.argv[3]
+form = parse_form(body)
+s = url
+for k in sorted(form):
+    s += k + form[k]
+sig = base64.b64encode(hmac.new(token.encode(), s.encode(), hashlib.sha1).digest()).decode()
+print(json.dumps({"url": url, "signature": sig, "body": body}))
+' "$1" "$2" "$3" "$ROOT/bin"
+}
+
+test_verify_cli_accepts_valid_stored_payload() {
+  local bf out rc
+  bf=$(mktemp "$TMP_ROOT/verify-valid.XXXXXX")
+  # The "+" in FAKE_DEST must be percent-encoded in the STORED (wire-shaped)
+  # body - form-urlencoded decoding treats a literal "+" as a space - while
+  # twilio_sign below takes the already-decoded value, exactly like a real
+  # Twilio request: encoded on the wire, decoded before signing/validating.
+  printf '%s' "MessageSid=SM1&From=$(printf '%s' "$FAKE_DEST" | sed 's/+/%2B/')&Body=hi" > "$bf"
+  sig=$(twilio_sign "$FAKE_URL" "$FAKE_AUTH_TOKEN" "MessageSid=SM1" "From=$FAKE_DEST" "Body=hi")
+  out=$(printf '%s' "$FAKE_AUTH_TOKEN" | PATH="$BASE_PATH" python3 "$VERIFY" --url "$FAKE_URL" --signature "$sig" --body-file "$bf"); rc=$?
+  expect_code 0 "$rc" "a correctly signed stored payload must validate"
+  assert_contains "$out" '"MessageSid": "SM1"' "the verifier did not print the decoded form fields"
+  pass "fm-twilio-sig-verify.py accepts a validly signed stored payload and prints its decoded fields"
+}
+
+test_verify_cli_rejects_tampered_body() {
+  local bf rc
+  bf=$(mktemp "$TMP_ROOT/verify-tampered.XXXXXX")
+  sig=$(twilio_sign "$FAKE_URL" "$FAKE_AUTH_TOKEN" "MessageSid=SM2" "From=$FAKE_DEST" "Body=original")
+  # The signature was computed over "Body=original"; the stored body was
+  # tampered with after the fact (or corrupted in transit/at rest).
+  printf '%s' "MessageSid=SM2&From=$(printf '%s' "$FAKE_DEST" | sed 's/+/%2B/')&Body=tampered" > "$bf"
+  printf '%s' "$FAKE_AUTH_TOKEN" | PATH="$BASE_PATH" python3 "$VERIFY" --url "$FAKE_URL" --signature "$sig" --body-file "$bf" >/dev/null 2>&1; rc=$?
+  expect_code 1 "$rc" "a tampered body must fail signature validation"
+  pass "fm-twilio-sig-verify.py rejects a stored payload whose body was tampered with"
+}
+
+test_verify_cli_rejects_wrong_url() {
+  local bf rc
+  bf=$(mktemp "$TMP_ROOT/verify-wrong-url.XXXXXX")
+  sig=$(twilio_sign "$FAKE_URL" "$FAKE_AUTH_TOKEN" "MessageSid=SM3" "From=$FAKE_DEST" "Body=hi")
+  printf '%s' "MessageSid=SM3&From=$(printf '%s' "$FAKE_DEST" | sed 's/+/%2B/')&Body=hi" > "$bf"
+  # Twilio signed against $FAKE_URL; validating against a different URL (e.g. a
+  # misconfigured ALERT_ROUTER_CAPTAIN_MSG_WEBHOOK_URL) must fail, since the
+  # webhook URL is part of the signed material.
+  printf '%s' "$FAKE_AUTH_TOKEN" | PATH="$BASE_PATH" python3 "$VERIFY" --url "https://example.invalid/wrong-path" --signature "$sig" --body-file "$bf" >/dev/null 2>&1; rc=$?
+  expect_code 1 "$rc" "validating against the wrong URL must fail even with an otherwise-correct signature"
+  pass "fm-twilio-sig-verify.py rejects a signature computed for a different URL"
+}
+
 # --- inbox poll shim ----------------------------------------------------------
 
 test_poll_inert_without_gate() {
@@ -654,6 +724,140 @@ test_poll_surfaces_pending_inbox() {
   out=$(FM_HOME="$home" "$ROOT/bin/fm-captain-msg-poll.sh")
   [ -z "$out" ] || fail "poll must ignore processed/ payloads (got: $out)"
   pass "the poll surfaces only unhandled top-level inbox payloads"
+}
+
+# --- inbox poll shim: router-relayed payloads (Teslemetry/tools PR 26 shape) -
+# The alert-router holds no Twilio Account Auth Token and validates nothing;
+# it relays {"url","signature","body"} verbatim into the SAME inbox the direct
+# listener uses. The poll must validate this shape itself before ever trusting
+# it as a pending reply - these tests exercise that path end to end (real
+# 1Password fetch mocked, real signature computation and validation).
+run_poll() {
+  local home=$1
+  FM_HOME="$home" PATH="$home/fakebin:$BASE_PATH" "$ROOT/bin/fm-captain-msg-poll.sh"
+}
+
+test_poll_router_relay_valid_normalizes_and_surfaces_pending() {
+  local home body
+  home=$(new_case poll-router-valid); mkdir -p "$home/state/captain-msg-inbox"
+  write_gate "$home"
+  write_op_mock "$home/fakebin"
+  body="MessageSid=SM00000000000000000000000000000201&From=$(printf '%s' "$FAKE_DEST" | sed 's/+/%2B/')&Body=Reply+from+the+road"
+  router_envelope "$FAKE_URL" "$FAKE_AUTH_TOKEN" "$body" > "$home/state/captain-msg-inbox/captain-msg-SM00000000000000000000000000000201.json"
+  out=$(run_poll "$home")
+  assert_contains "$out" "captain-msg 1 pending" "a validly signed router-relayed payload must surface as pending"
+  assert_contains "$out" "captain-msg-SM00000000000000000000000000000201.json" "poll must name the normalized file"
+  assert_grep '"params"' "$home/state/captain-msg-inbox/captain-msg-SM00000000000000000000000000000201.json" \
+    "a valid router-relayed payload must be normalized to the {received_at,params} shape in place"
+  assert_grep '"Body": "Reply from the road"' "$home/state/captain-msg-inbox/captain-msg-SM00000000000000000000000000000201.json" \
+    "the normalized envelope must carry the decoded reply body"
+  pass "the poll validates a router-relayed payload's signature and normalizes it into the trusted pending shape"
+}
+
+test_poll_router_relay_tampered_body_quarantined() {
+  local home name
+  home=$(new_case poll-router-tampered); mkdir -p "$home/state/captain-msg-inbox"
+  write_gate "$home"
+  write_op_mock "$home/fakebin"
+  name="captain-msg-SM00000000000000000000000000000202.json"
+  # Sign one body, then store a DIFFERENT one under that same signature - the
+  # same tamper this suite's fm-twilio-sig-verify.py tests exercise, but here
+  # through the full poll path: jq mutates only .body, leaving the envelope's
+  # .signature as computed for the original (now-mismatched) content.
+  router_envelope "$FAKE_URL" "$FAKE_AUTH_TOKEN" "MessageSid=SM00000000000000000000000000000202&From=$(printf '%s' "$FAKE_DEST" | sed 's/+/%2B/')&Body=original" \
+    | jq '.body = "MessageSid=SM00000000000000000000000000000202&From=%2B14158675309&Body=tampered"' \
+    > "$home/state/captain-msg-inbox/$name"
+  out=$(run_poll "$home")
+  assert_contains "$out" "captain-msg-quarantine" "a tampered router-relayed payload must be quarantined loudly, not silently dropped"
+  assert_contains "$out" "$name" "the quarantine notice must name the file"
+  assert_not_contains "$out" "captain-msg 1 pending" "a quarantined payload must never be reported as a trusted pending reply"
+  assert_present "$home/state/captain-msg-inbox/quarantine/$name" "the tampered payload must be moved into quarantine/"
+  assert_present "$home/state/captain-msg-inbox/quarantine/$name.reason" "quarantine must record why, not just move the file silently"
+  assert_absent "$home/state/captain-msg-inbox/$name" "a quarantined payload must not remain at the top level (it would re-surface as pending)"
+  pass "the poll quarantines a router-relayed payload whose body was tampered with, loudly and with a reason"
+}
+
+test_poll_router_relay_missing_signature_quarantined() {
+  local home name
+  home=$(new_case poll-router-nosig); mkdir -p "$home/state/captain-msg-inbox"
+  write_gate "$home"
+  write_op_mock "$home/fakebin"
+  name="captain-msg-SM00000000000000000000000000000203.json"
+  printf '{"url":"%s","signature":"","body":"MessageSid=SM00000000000000000000000000000203&From=%s&Body=hi"}' \
+    "$FAKE_URL" "$FAKE_DEST" > "$home/state/captain-msg-inbox/$name"
+  out=$(run_poll "$home")
+  assert_contains "$out" "captain-msg-quarantine" "a missing X-Twilio-Signature must be quarantined, exactly like an invalid one"
+  assert_present "$home/state/captain-msg-inbox/quarantine/$name" "the unsigned payload must be quarantined"
+  pass "the poll quarantines a router-relayed payload with an empty/missing signature"
+}
+
+test_poll_router_relay_from_mismatch_quarantined() {
+  local home name
+  home=$(new_case poll-router-from-mismatch); mkdir -p "$home/state/captain-msg-inbox"
+  write_gate "$home"
+  write_op_mock "$home/fakebin"
+  name="captain-msg-SM00000000000000000000000000000204.json"
+  router_envelope "$FAKE_URL" "$FAKE_AUTH_TOKEN" "MessageSid=SM00000000000000000000000000000204&From=%2B19995551234&Body=not+the+captain" \
+    > "$home/state/captain-msg-inbox/$name"
+  out=$(run_poll "$home")
+  assert_contains "$out" "captain-msg-quarantine" "a validly signed reply from an unexpected From must still be quarantined"
+  assert_contains "$out" "does not match" "the quarantine reason must explain the From mismatch"
+  assert_present "$home/state/captain-msg-inbox/quarantine/$name" "the From-mismatched payload must be quarantined"
+  pass "the poll quarantines a validly signed router-relayed payload from a non-captain number"
+}
+
+test_poll_router_relay_unrecognized_shape_quarantined() {
+  local home name
+  home=$(new_case poll-router-garbage); mkdir -p "$home/state/captain-msg-inbox"
+  write_gate "$home"
+  write_op_mock "$home/fakebin"
+  name="captain-msg-garbage.json"
+  printf '{"not_a_known_shape": true}' > "$home/state/captain-msg-inbox/$name"
+  out=$(run_poll "$home")
+  assert_contains "$out" "captain-msg-quarantine" "a payload matching neither known envelope shape must be quarantined, never silently ignored"
+  assert_present "$home/state/captain-msg-inbox/quarantine/$name" "the malformed payload must be quarantined"
+  pass "the poll quarantines a payload matching neither the trusted nor the router-relay envelope shape"
+}
+
+test_poll_router_relay_auth_token_fetch_failure_stays_pending_not_trusted() {
+  local home name out
+  home=$(new_case poll-router-op-fail); mkdir -p "$home/state/captain-msg-inbox" "$home/fakebin"
+  write_gate "$home"
+  name="captain-msg-SM00000000000000000000000000000205.json"
+  router_envelope "$FAKE_URL" "$FAKE_AUTH_TOKEN" "MessageSid=SM00000000000000000000000000000205&From=$FAKE_DEST&Body=hi" \
+    > "$home/state/captain-msg-inbox/$name"
+  cat > "$home/fakebin/op" <<'SH'
+#!/usr/bin/env bash
+echo "op mock: simulated 1Password outage" >&2
+exit 1
+SH
+  chmod +x "$home/fakebin/op"
+  out=$(run_poll "$home")
+  assert_contains "$out" "cannot validate" "an inability to fetch the Auth Token must be reported loudly"
+  assert_not_contains "$out" "captain-msg 1 pending" "an unvalidated router-relayed payload must NEVER be reported as a trusted pending reply"
+  assert_not_contains "$out" "captain-msg-quarantine" "an infra failure to validate is not proof of forgery - it must not quarantine a payload that was never checked"
+  assert_present "$home/state/captain-msg-inbox/$name" "the payload must remain in place, untouched, for a retry on the next poll cycle"
+  pass "the poll neither trusts nor quarantines a router-relayed payload it could not validate, and says so loudly"
+}
+
+test_poll_router_relay_normalized_payload_not_revalidated() {
+  local home name out
+  home=$(new_case poll-router-no-reval); mkdir -p "$home/state/captain-msg-inbox"
+  write_gate "$home"
+  write_op_mock "$home/fakebin"
+  name="captain-msg-SM00000000000000000000000000000206.json"
+  router_envelope "$FAKE_URL" "$FAKE_AUTH_TOKEN" "MessageSid=SM00000000000000000000000000000206&From=$(printf '%s' "$FAKE_DEST" | sed 's/+/%2B/')&Body=first+pass" \
+    > "$home/state/captain-msg-inbox/$name"
+  out=$(run_poll "$home")
+  assert_contains "$out" "captain-msg 1 pending" "the first poll must validate and surface the reply"
+  # Replace op with a tripwire: a second poll must never call it again, since
+  # the payload is already normalized to the trusted {received_at,params}
+  # shape and pass 1 only looks at un-normalized (raw) files.
+  write_tripwire_mock "$home/fakebin" op
+  out=$(run_poll "$home")
+  assert_contains "$out" "captain-msg 1 pending" "an already-normalized payload must keep surfacing as pending until handled"
+  assert_not_contains "$out" "TRIPWIRE" "a second poll must not re-fetch the Auth Token or re-validate an already-normalized payload"
+  pass "the poll never re-validates a payload it has already normalized"
 }
 
 # --- fm-captain-msg-arm.sh (the non-blocking paths only: gate check and
@@ -765,8 +969,18 @@ test_from_mismatch_rejected_even_with_valid_signature
 test_idempotent_redelivery_by_message_sid
 test_inbox_write_is_atomic_no_partial_files_visible
 test_recv_serve_fetches_auth_token_from_1password_and_serves_route
+test_verify_cli_accepts_valid_stored_payload
+test_verify_cli_rejects_tampered_body
+test_verify_cli_rejects_wrong_url
 test_poll_inert_without_gate
 test_poll_surfaces_pending_inbox
+test_poll_router_relay_valid_normalizes_and_surfaces_pending
+test_poll_router_relay_tampered_body_quarantined
+test_poll_router_relay_missing_signature_quarantined
+test_poll_router_relay_from_mismatch_quarantined
+test_poll_router_relay_unrecognized_shape_quarantined
+test_poll_router_relay_auth_token_fetch_failure_stays_pending_not_trusted
+test_poll_router_relay_normalized_payload_not_revalidated
 test_arm_inert_without_gate
 test_arm_refuses_incomplete_config
 test_arm_show_url_prints_path_and_configured_url

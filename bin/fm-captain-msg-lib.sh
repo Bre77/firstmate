@@ -19,6 +19,9 @@
 #   cmsg_require_config       - cmsg_load_config, then fail loudly (stderr + return
 #                                1) naming every required key left unset
 #   cmsg_inbox_dir            - state/captain-msg-inbox
+#   cmsg_quarantine_dir       - state/captain-msg-inbox/quarantine, for a
+#                                router-relayed payload that failed signature
+#                                or From validation (bin/fm-captain-msg-poll.sh)
 #   cmsg_path                 - fixed URL path the inbound route answers on
 #   cmsg_speech_check <text>  - the speech contract; see below
 #
@@ -62,6 +65,7 @@ cmsg_enabled() {
 }
 
 cmsg_inbox_dir() { printf '%s/captain-msg-inbox' "${STATE:-$FM_HOME/state}"; }
+cmsg_quarantine_dir() { printf '%s/quarantine' "$(cmsg_inbox_dir)"; }
 cmsg_path()      { printf '/captain-msg'; }
 
 # Resolve CAPTAIN_MSG_DESTINATION, CAPTAIN_MSG_ACCOUNT_SID,
