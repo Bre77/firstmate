@@ -61,8 +61,6 @@ Config is passed in by the launcher (bin/fm-clickstack-recv.sh) via environment:
   CMHOOK_INBOX           inbox directory for accepted captain-msg replies
 """
 
-import base64
-import hashlib
 import hmac
 import json
 import os
@@ -74,6 +72,8 @@ import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qsl, parse_qs, urlparse
+
+from fm_twilio_sig import twilio_signature_valid
 
 BIND = os.environ.get("CSHOOK_BIND", "0.0.0.0")
 try:
@@ -203,24 +203,6 @@ def _betterstack_inbox_name(raw, seq):
     if stem:
         return "event-%s.json" % stem
     return "event-%d-%06d.json" % (time.time_ns(), seq)
-
-
-def _twilio_signature_valid(url, form, signature, auth_token):
-    """Twilio's own signed-request algorithm (see the incoming-message webhook
-    reference docs/captain-messaging.md links to): HMAC-SHA1, keyed by the
-    Account Auth Token, over the exact webhook URL with every POST parameter
-    (sorted by key, no delimiters) appended directly to it. This is what
-    twilio-python's RequestValidator computes; it is reimplemented here in
-    stdlib only, because this daemon has no package manager or vendored
-    dependencies (see the module docstring)."""
-    if not auth_token or not signature or not url:
-        return False
-    s = url
-    for key in sorted(form.keys()):
-        s += key + form[key]
-    digest = hmac.new(auth_token.encode("utf-8"), s.encode("utf-8"), hashlib.sha1).digest()
-    computed = base64.b64encode(digest).decode("utf-8")
-    return hmac.compare_digest(computed, signature)
 
 
 def _derive_captain_msg_id(form):
@@ -414,7 +396,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         form = dict(parse_qsl(raw.decode("utf-8", "replace"), keep_blank_values=True))
         signature = self.headers.get("X-Twilio-Signature", "")
-        if not _twilio_signature_valid(CMHOOK_WEBHOOK_URL, form, signature, CMHOOK_AUTH_TOKEN):
+        if not twilio_signature_valid(CMHOOK_WEBHOOK_URL, form, signature, CMHOOK_AUTH_TOKEN):
             # A generic 403 tells the sender nothing about why; the specific
             # reason is logged locally only, so a misconfiguration (wrong
             # webhook URL, stale auth token) stays diagnosable without leaking
