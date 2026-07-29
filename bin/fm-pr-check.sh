@@ -17,6 +17,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -124,4 +125,11 @@ fm_pr_poll_publish_prepared || {
   echo "error: could not publish PR poll" >&2
   exit 1
 }
+
+# Best-effort fleet-provenance label, every mode that opens a PR (no-mistakes,
+# direct-PR, fork-only) converges here once firstmate records pr=, so this is
+# the single place that covers all of them. Runs after the poll is armed so a
+# labelling hiccup never costs the merge watch.
+fm_pr_apply_label "$PROVIDER" "$PROJECT_PATH" "$URL" "$(fm_pr_label_name "$CONFIG")"
+
 printf 'armed: state/%s.check.sh\n' "$ID"

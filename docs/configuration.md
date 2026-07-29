@@ -46,6 +46,14 @@ Set the local, gitignored `config/backlog-backend` file to `manual` to force man
 Absent or `tasks-axi` selects the default tasks-axi backend.
 The file format is unchanged in both modes; tasks-axi and manual edits produce the same `## In flight`, `## Queued`, and `## Done` sections.
 
+## PR label (config/pr-label)
+
+Every commit rides under the captain's own identity rather than a separate machine account, so fleet-opened work is identified by metadata instead: the `fm/<task-id>` branch prefix, plus a label applied to the PR.
+`bin/fm-pr-check.sh` applies this label (`fm_pr_label_name`/`fm_pr_apply_label` in `bin/fm-pr-lib.sh`) right after it arms the merge poll, which is the one point every PR-producing delivery mode (`no-mistakes`, `direct-PR`, `fork-only`) converges on, so a single call site covers all of them.
+The label name is the first non-empty, non-comment line of the local, gitignored `config/pr-label`, trimmed; absent or blank defaults to `fm`.
+Label application is GitHub-only today (`gh label create` then `gh pr edit --add-label`) and always best-effort: a missing `gh`, a repo that refuses label creation, or an existing label all degrade to a stderr warning rather than aborting - losing a PR to a labelling failure would be worse than an unlabelled one.
+GitLab PRs are left unlabelled because no `glab` label syntax is verified yet; do not add it without empirical verification first.
+
 ## Runtime backend (config/backend / FM_BACKEND)
 
 For spawn-capable adapters, the runtime session-provider backend controls where task windows/endpoints are created, captured, sent to, watched, and killed.

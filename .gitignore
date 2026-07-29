@@ -21,3 +21,4 @@ config/betterstack-webhook.env
 config/captain-msg.env
 config/wedge-alarm
 config/herdr-presentation-spaces
+config/pr-label

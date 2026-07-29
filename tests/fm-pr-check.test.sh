@@ -59,6 +59,10 @@ make_case() {
 # write_gh_mock <fakebin>: a `gh` stub covering both call shapes the merge
 # check and the activity poll need - `pr view ... --json state|headRefOid`
 # for merge detection, and `api <path> ... -q <expr>` for activity polling.
+# Also covers `label create` and `pr edit --add-label`, the labelling calls
+# fm_pr_apply_label makes: FM_TEST_LABEL_CREATE_FAIL=1 and
+# FM_TEST_PR_EDIT_FAIL=1 make each fail independently, to exercise graceful
+# degradation.
 # The api branch runs the REAL jq against a fixture file selected by path,
 # executing the actual jq expression the script under test built - not a
 # canned response - so a bug in that expression fails the test instead of
@@ -82,6 +86,14 @@ if [ "${1:-}" = "pr" ] && [ "${2:-}" = "view" ]; then
       exit 0
       ;;
   esac
+  exit 0
+fi
+if [ "${1:-}" = "label" ] && [ "${2:-}" = "create" ]; then
+  [ "${FM_TEST_LABEL_CREATE_FAIL:-}" = "1" ] && exit 1
+  exit 0
+fi
+if [ "${1:-}" = "pr" ] && [ "${2:-}" = "edit" ]; then
+  [ "${FM_TEST_PR_EDIT_FAIL:-}" = "1" ] && exit 1
   exit 0
 fi
 if [ "${1:-}" = "api" ]; then
@@ -367,6 +379,112 @@ JSON
   pass "a new bot review on a newer commit surfaces via the cursor despite an intervening self/crew reply's timestamp race"
 }
 
+# test_label_applies_default_name: fm-pr-check.sh creates and applies the
+# default "fm" fleet-provenance label to a fresh github PR when no
+# config/pr-label override is present.
+test_label_applies_default_name() {
+  local case_dir url
+  case_dir=$(make_case label-default)
+  write_gh_mock "$case_dir/fakebin"
+  url="https://github.com/example/repo/pull/101"
+
+  run_pr_check "$case_dir" task-x "$url" > /dev/null 2>&1 \
+    || fail "label-default: fm-pr-check.sh should succeed"
+
+  assert_grep "label create fm --repo example/repo" "$case_dir/gh.log" \
+    "label-default: gh label create was not invoked with the default label name"
+  assert_grep "pr edit $url --add-label fm" "$case_dir/gh.log" \
+    "label-default: gh pr edit --add-label was not invoked with the default label name"
+  pass "fm-pr-check.sh creates and applies the default 'fm' label to a github PR"
+}
+
+# test_label_applies_configured_name: config/pr-label overrides the label name
+# used for both the create-if-absent call and the apply call.
+test_label_applies_configured_name() {
+  local case_dir url
+  case_dir=$(make_case label-configured)
+  write_gh_mock "$case_dir/fakebin"
+  printf 'crewmate-pr\n' > "$case_dir/home/config/pr-label"
+  url="https://github.com/example/repo/pull/102"
+
+  run_pr_check "$case_dir" task-x "$url" > /dev/null 2>&1 \
+    || fail "label-configured: fm-pr-check.sh should succeed"
+
+  assert_grep "label create crewmate-pr --repo example/repo" "$case_dir/gh.log" \
+    "label-configured: gh label create did not use the configured label name"
+  assert_grep "pr edit $url --add-label crewmate-pr" "$case_dir/gh.log" \
+    "label-configured: gh pr edit --add-label did not use the configured label name"
+  pass "fm-pr-check.sh applies the config/pr-label-configured name instead of the default"
+}
+
+# test_label_create_failure_still_applies: a repo that already has the label
+# (or refuses creation for any reason) must not stop the apply call - fm-pr-lib
+# swallows the create failure and still tries to apply the label.
+test_label_create_failure_still_applies() {
+  local case_dir url rc
+  case_dir=$(make_case label-create-fail)
+  write_gh_mock "$case_dir/fakebin"
+  url="https://github.com/example/repo/pull/103"
+
+  set +e
+  FM_TEST_LABEL_CREATE_FAIL=1 run_pr_check "$case_dir" task-x "$url" > /dev/null 2>&1
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "label-create-fail: fm-pr-check.sh must still succeed when label creation fails"
+  assert_grep "pr edit $url --add-label fm" "$case_dir/gh.log" \
+    "label-create-fail: gh pr edit --add-label must still be attempted after a failed label create"
+  pass "a failed (or already-existing) label create never blocks the apply attempt"
+}
+
+# test_label_apply_failure_warns_but_never_fails_the_task: losing the label
+# entirely (create AND apply both fail, e.g. no permission or unsupported
+# repo) must degrade to a stderr warning, never abort the PR recording/poll
+# arm - AGENTS.md's "never lose a PR" contract for this feature.
+test_label_apply_failure_warns_but_never_fails_the_task() {
+  local case_dir url rc err
+  case_dir=$(make_case label-apply-fail)
+  write_gh_mock "$case_dir/fakebin"
+  url="https://github.com/example/repo/pull/104"
+  err="$case_dir/err"
+
+  set +e
+  FM_TEST_LABEL_CREATE_FAIL=1 FM_TEST_PR_EDIT_FAIL=1 \
+    run_pr_check "$case_dir" task-x "$url" > /dev/null 2> "$err"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "label-apply-fail: a labelling failure must never fail fm-pr-check.sh"
+  assert_grep "could not apply PR label 'fm' to $url" "$err" \
+    "label-apply-fail: a total labelling failure must warn to stderr"
+  assert_present "$case_dir/home/state/task-x.check.sh" \
+    "label-apply-fail: the merge poll must still be armed despite the labelling failure"
+  pass "a total labelling failure warns to stderr but still records the PR and arms the merge poll"
+}
+
+# test_label_skips_gitlab_provider: labelling is github-only today; a gitlab
+# merge request must never invoke gh's label/pr-edit calls (no verified glab
+# label syntax to fall back to).
+test_label_skips_gitlab_provider() {
+  local case_dir url
+  case_dir=$(make_case label-gitlab-skip)
+  write_gh_mock "$case_dir/fakebin"
+  cat > "$case_dir/fakebin/glab" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/glab"
+  url="https://gitlab.com/group/project/-/merge_requests/1"
+  : > "$case_dir/gh.log"
+
+  run_pr_check "$case_dir" task-x "$url" > /dev/null 2>&1 \
+    || fail "label-gitlab-skip: fm-pr-check.sh should succeed"
+
+  assert_no_grep "label create" "$case_dir/gh.log" \
+    "label-gitlab-skip: gh label create must never run for a gitlab merge request"
+  assert_no_grep "pr edit" "$case_dir/gh.log" \
+    "label-gitlab-skip: gh pr edit must never run for a gitlab merge request"
+  pass "labelling is a no-op for a gitlab merge request (github-only today)"
+}
+
 test_rearm_does_not_touch_watermark
 test_defensive_missing_watermark_initializes_silently
 test_poll_surfaces_new_activity_and_advances_watermark
@@ -376,3 +494,8 @@ test_watcher_merge_takes_precedence_no_activity_poll
 test_watcher_surfaces_pr_comment_when_open
 test_bot_review_cursor_seeds_silently_on_first_sighting
 test_bot_review_surfaces_despite_self_reply_watermark_race
+test_label_applies_default_name
+test_label_applies_configured_name
+test_label_create_failure_still_applies
+test_label_apply_failure_warns_but_never_fails_the_task
+test_label_skips_gitlab_provider
