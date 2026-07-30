@@ -1011,6 +1011,44 @@ test_arm_fails_loud_when_no_fresh_watcher_confirmable() {
   pass "arm reports FAILED and exits non-zero when no fresh watcher can be confirmed"
 }
 
+test_arm_reports_migration_in_progress_instead_of_generic_failure() {
+  local dir state fakebin armout live armpid status
+  dir=$(make_case arm-migration-in-progress)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  mark_pr_check_migration_complete "$state"
+  # A live migration holds the generic exclusion lock as a plain pid with no
+  # watcher identity fields (a real watcher always publishes those too), and
+  # its command line is genuinely fm-pr-check-migrate.sh - the verified shape
+  # the arm diagnostic now recognizes instead of guessing off a bare pid.
+  # `exec -a` sets that argv[0] on the real sleep process directly, in place,
+  # rather than backgrounding a wrapper script whose own child would be
+  # orphaned (and keep this test's stdout pipe open for the full sleep) the
+  # instant the wrapper alone is killed below.
+  ( exec -a fm-pr-check-migrate.sh sleep 300 ) &
+  live=$!
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$live" > "$state/.watch.lock/pid"
+  touch -t 200001010000 "$state/.last-watcher-beat"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=3 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  wait_for_exit "$armpid" 120
+  status=$?
+  [ "$status" -ne 124 ] || fail "arm never returned while a verified migration held exclusion"
+  [ "$status" -ne 0 ] || fail "arm exited zero while a verified migration held exclusion"
+  grep -F 'watcher: FAILED - migration-in-progress' "$armout" >/dev/null \
+    || fail "arm did not recognize the verified migration-exclusion owner: $(cat "$armout")"
+  ! grep -qF 'watcher: FAILED - no live watcher with a fresh beacon' "$armout" \
+    || fail "arm reported the generic no-live-watcher failure during a verified migration"
+  grep -q 'reason=migration-in-progress' "$state/.watch-cycle-exits.log" \
+    || fail "migration-in-progress was not recorded in the lifecycle ledger"
+  is_live_non_zombie "$live" || fail "arm killed the unrelated migration process"
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  pass "arm recognizes a verified migration-exclusion owner and reports migration-in-progress instead of the generic failure"
+}
+
 test_cycle_exit_ledger_links_successor_and_stays_bounded() {
   local dir state fakebin armout check_file first_arm successor_arm successor_pid i size iteration
   dir=$(make_case cycle-ledger)
@@ -1202,5 +1240,6 @@ test_arm_hup_release_does_not_scale_with_the_poll_interval
 test_arm_propagates_immediate_wake_before_confirmation
 test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
+test_arm_reports_migration_in_progress_instead_of_generic_failure
 test_cycle_exit_ledger_links_successor_and_stays_bounded
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified

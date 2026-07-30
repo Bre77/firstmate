@@ -174,6 +174,15 @@ assert_valid_migration_marker() {
   [ "$(awk 'END { print NR + 0 }' "$marker")" -eq 1 ] || fail "migration marker had extra records"
 }
 
+set_registration_line() {
+  local file=$1 line_no=$2 value=$3 tmp
+  tmp="$file.tmp.$$"
+  awk -v n="$line_no" -v v="$value" 'NR==n{print v; next}{print}' "$file" > "$tmp"
+  cat "$tmp" > "$file"
+  rm -f "$tmp"
+  chmod 0600 "$file"
+}
+
 assert_valid_scan_marker() {
   local marker=$1
   [ -f "$marker" ] && [ ! -L "$marker" ] || fail "migration success did not publish an ordinary scan marker"
@@ -854,6 +863,95 @@ SH
   pass "concurrent watchers observe only complete private poll publications"
 }
 
+test_replacement_publication_never_exposes_mixed_generation() {
+  local dir state boundary
+  dir=$(make_case replacement-publication-boundary)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/1 >/dev/null 2>/dev/null \
+    || fail "replacement-boundary fixture initial arm failed"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "replacement-boundary fixture did not start from a valid poll"
+
+  boundary="$dir/boundary.log"
+  : > "$boundary"
+  cat > "$dir/fakebin/mv" <<SH
+#!/usr/bin/env bash
+last=\${!#}
+case "\$last" in
+  */task-a.pr-poll)
+    if [ -e "\${last%/*}/task-a.check.sh" ]; then
+      printf 'check present during data publish\n' >> '$boundary'
+    fi
+    ;;
+  */task-a.check.sh)
+    if [ ! -e "\${last%/*}/task-a.pr-poll" ] || [ ! -e "\${last%/*}/task-a.pr-poll-registration" ]; then
+      printf 'check published before data/registration\n' >> '$boundary'
+    fi
+    ;;
+esac
+exec '$REAL_MV' "\$@"
+SH
+  chmod +x "$dir/fakebin/mv"
+
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/2 >/dev/null 2>/dev/null \
+    || fail "replacement arm failed"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "replacement arm did not leave a valid poll"
+  [ ! -s "$boundary" ] \
+    || fail "replacement publication exposed a mixed generation: $(cat "$boundary")"
+  pass "replacement publication neutralizes the runnable check first and publishes it last: no mixed generation is ever exposed"
+}
+
+test_poll_artifacts_valid_reason_codes_are_stable_and_distinct() {
+  local dir state hash_dir identity_dir meta_dir
+
+  dir=$(make_case reason-codes-valid)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/1 >/dev/null 2>/dev/null \
+    || fail "reason-code fixture initial arm failed"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "reason-code fixture did not start from a valid poll"
+  [ -z "$FM_PR_POLL_ARTIFACTS_INVALID_REASON" ] \
+    || fail "a valid poll set a reason code: $FM_PR_POLL_ARTIFACTS_INVALID_REASON"
+
+  hash_dir=$(make_case reason-codes-hash)
+  state="$hash_dir/home/state"
+  write_task_meta "$hash_dir"
+  run_check_entry "$hash_dir" task-a https://github.com/o/r/pull/1 >/dev/null 2>/dev/null \
+    || fail "reason-code hash fixture initial arm failed"
+  set_registration_line "$state/task-a.pr-poll-registration" 8 "$(printf '%064d' 0)"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    && fail "a corrupted registration data hash was accepted as valid"
+  [ "$FM_PR_POLL_ARTIFACTS_INVALID_REASON" = registration-data-hash-mismatch ] \
+    || fail "hash-class corruption did not report registration-data-hash-mismatch, got: $FM_PR_POLL_ARTIFACTS_INVALID_REASON"
+
+  identity_dir=$(make_case reason-codes-identity)
+  state="$identity_dir/home/state"
+  write_task_meta "$identity_dir"
+  run_check_entry "$identity_dir" task-a https://github.com/o/r/pull/1 >/dev/null 2>/dev/null \
+    || fail "reason-code identity fixture initial arm failed"
+  set_registration_line "$state/task-a.pr-poll-registration" 11 "0:0"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    && fail "a corrupted registration check identity was accepted as valid"
+  [ "$FM_PR_POLL_ARTIFACTS_INVALID_REASON" = registration-check-identity-mismatch ] \
+    || fail "inode-class corruption did not report registration-check-identity-mismatch, got: $FM_PR_POLL_ARTIFACTS_INVALID_REASON"
+
+  meta_dir=$(make_case reason-codes-meta)
+  state="$meta_dir/home/state"
+  write_task_meta "$meta_dir"
+  run_check_entry "$meta_dir" task-a https://github.com/o/r/pull/1 >/dev/null 2>/dev/null \
+    || fail "reason-code metadata fixture initial arm failed"
+  printf 'unexpected-post-pr-field\n' >> "$state/task-a.meta"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    && fail "metadata with an unrecognized post-pr field was accepted as valid"
+  [ "$FM_PR_POLL_ARTIFACTS_INVALID_REASON" = meta-post-pr-invalid ] \
+    || fail "metadata-class corruption did not report meta-post-pr-invalid, got: $FM_PR_POLL_ARTIFACTS_INVALID_REASON"
+
+  pass "fm_pr_poll_artifacts_valid exposes a stable reason code, and hash/inode/registration reasons stay distinct from metadata reasons"
+}
+
 test_migration_excludes_older_watcher_before_scan() {
   local dir state gate sentinel older_pid rc
   dir=$(make_case migration-pause-before-scan)
@@ -1448,6 +1546,34 @@ SH
   [ "$(file_mode "$external")" = 644 ] \
     || fail "source quarantine changed a hardlinked external file mode"
   pass "quarantine type and mode faults fail closed and recover only when a retry can validate them"
+}
+
+test_ambiguous_migration_records_reason_and_metadata_snapshot() {
+  local dir state meta_hash snapshot
+  dir=$(make_case migration-ambiguous-reason)
+  state="$dir/home/state"
+  write_ambiguous_poll "$dir"
+  FM_HOME="$dir/home" PATH="$BASE_PATH" "$MIGRATE" >/dev/null 2>/dev/null \
+    || fail "ambiguous migration with reason recording failed"
+  meta_hash=$(shasum -a 256 "$state/task-a.meta" | awk '{print $1}')
+  assert_grep "task task-a: ambiguous classification reason=meta-post-pr-invalid meta_sha256=$meta_hash" \
+    "$state/.pr-check-migration.log" \
+    "ambiguous migration did not durably record the reason code and metadata hash"
+  snapshot=$(find "$state/.pr-check-quarantine" -name "task-a.ambiguous-meta.$meta_hash" -type f | head -1)
+  [ -n "$snapshot" ] || fail "ambiguous migration did not preserve a private snapshot of the classified metadata"
+  [ "$(file_mode "$snapshot")" = 600 ] || fail "ambiguous metadata snapshot was not private"
+  cmp -s "$state/task-a.meta" "$snapshot" \
+    || fail "ambiguous metadata snapshot bytes did not match the classified metadata"
+
+  # A rerun against the same still-ambiguous metadata must not duplicate the
+  # snapshot or the log line: the reason is content-addressed and idempotent.
+  FM_HOME="$dir/home" PATH="$BASE_PATH" "$MIGRATE" >/dev/null 2>/dev/null \
+    || fail "idempotent rerun of the ambiguous migration failed"
+  [ "$(find "$state/.pr-check-quarantine" -name 'task-a.ambiguous-meta.*' -type f | wc -l | tr -d '[:space:]')" = 1 ] \
+    || fail "rerun duplicated the ambiguous metadata snapshot"
+  [ "$(grep -c "reason=meta-post-pr-invalid meta_sha256=$meta_hash" "$state/.pr-check-migration.log")" = 1 ] \
+    || fail "rerun duplicated the ambiguous reason log line"
+  pass "ambiguous migration durably records a stable reason code and a private, content-addressed metadata snapshot"
 }
 
 test_ambiguous_failure_accepts_validated_replacement() {
@@ -3356,6 +3482,8 @@ test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
 test_atomic_interruption_leaves_no_partial_artifact
 test_concurrent_watcher_sees_only_complete_publication
+test_replacement_publication_never_exposes_mixed_generation
+test_poll_artifacts_valid_reason_codes_are_stable_and_distinct
 test_postrename_poll_validation_revokes_and_retries
 test_migration_initializes_fresh_state
 test_migration_excludes_older_watcher_before_scan
@@ -3364,6 +3492,7 @@ test_marker_and_diagnostic_rename_fail_closed
 test_postrename_marker_and_diagnostic_validation_retries
 test_quarantine_validation_and_retry_contract
 test_failed_outcomes_block_every_retry_until_repaired
+test_ambiguous_migration_records_reason_and_metadata_snapshot
 test_ambiguous_failure_accepts_validated_replacement
 test_replacement_provenance_negative_matrix
 test_complete_single_link_validation

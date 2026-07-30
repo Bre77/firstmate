@@ -147,6 +147,27 @@ epoch_outcome() {
   sed -n 's/^.*outcome=\([a-z][a-z]*\) .*$/\1/p' "$1/state/.claude-autoarm-epoch" 2>/dev/null || true
 }
 
+# --- healthy externally-owned arm fixture helpers ------------------------------
+# Mirrors tests/fm-turnend-guard.test.sh's record_watcher_lock pattern: a live
+# background process stands in for the watcher, identified through the same
+# fm_pid_identity the hook itself uses, with the lock's fields written directly
+# as a plain directory (fm_lock_read_dir accepts that shape).
+
+watcher_identity() {
+  local dir=$1 pid=$2
+  FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$dir/bin/fm-wake-lib.sh" "$pid"
+}
+
+record_watcher_lock() {
+  local dir=$1 pid=$2 identity=$3 root
+  root=$(cd "$dir" && pwd)
+  mkdir -p "$dir/state/.watch.lock"
+  printf '%s\n' "$pid" > "$dir/state/.watch.lock/pid"
+  printf '%s\n' "$root" > "$dir/state/.watch.lock/fm-home"
+  printf '%s\n' "$dir/bin/fm-watch.sh" > "$dir/state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$dir/state/.watch.lock/pid-identity"
+}
+
 # --- registration contract ----------------------------------------------------
 
 test_settings_registers_autoarm_with_multi_hour_timeout() {
@@ -399,6 +420,32 @@ test_active_in_marked_secondmate_home() {
   pass "auto-arm: active in a marked secondmate home"
 }
 
+test_covered_when_healthy_external_arm_already_running() {
+  local dir pid identity out status
+  dir=$(make_primary_dir "$TMP_ROOT/covered")
+  : > "$dir/state/task.meta"
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not identify live watcher holder"
+  }
+  record_watcher_lock "$dir" "$pid" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+  # A poison fixture: if the hook attaches instead of skipping, this file
+  # appears and the test fails on that alone.
+  write_arm_fixture "$dir" actionable
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "a healthy identity-matched external arm must never rewake"
+  [ -z "$out" ] || fail "covered close produced output: $out"
+  [ ! -e "$dir/state/arm-ran" ] || fail "hook attached to the arm wrapper instead of skipping a healthy external arm"
+  [ "$(epoch_outcome "$dir")" = covered ] || fail "epoch must record outcome=covered, got: $(epoch_outcome "$dir")"
+  pass "auto-arm: a healthy externally-owned arm is covered, never attached, with no rewake"
+}
+
 test_fm_lock_status_still_works_with_shared_lib() {
   local out
   out=$(FM_HOME="$TMP_ROOT/lock-status-home" bash "$ROOT/bin/fm-lock.sh" status 2>&1)
@@ -422,4 +469,5 @@ test_single_flight_admits_exactly_one_owner
 test_need_vanished_mid_cycle_closes_quietly
 test_afk_mid_cycle_suppresses_rewake
 test_active_in_marked_secondmate_home
+test_covered_when_healthy_external_arm_already_running
 test_fm_lock_status_still_works_with_shared_lib

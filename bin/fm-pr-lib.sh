@@ -89,6 +89,8 @@ FM_PR_RETIRE_REG_IDENTITY=
 FM_PR_RETIRE_RECEIPT_HASH=
 FM_PR_RETIRE_RECEIPT_IDENTITY=
 FM_PR_POLL_RETIREMENT_REJECTED=
+FM_PR_META_PARSE_REASON=
+FM_PR_POLL_ARTIFACTS_INVALID_REASON=
 
 fm_task_id_path_safe() {
   local id=${1-}
@@ -292,8 +294,9 @@ fm_pr_metadata_identity_parse() {
   FM_PR_META_HOST=
   FM_PR_META_PATH=
   FM_PR_META_NUMBER=
-  [ -f "$file" ] && [ ! -L "$file" ] || return 1
-  [ "$(fm_pr_file_link_count "$file")" = 1 ] || return 1
+  FM_PR_META_PARSE_REASON=
+  [ -f "$file" ] && [ ! -L "$file" ] || { FM_PR_META_PARSE_REASON="meta-missing"; return 1; }
+  [ "$(fm_pr_file_link_count "$file")" = 1 ] || { FM_PR_META_PARSE_REASON="meta-hardlinked"; return 1; }
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       pr=*)
@@ -322,9 +325,22 @@ fm_pr_metadata_identity_parse() {
         ;;
     esac
   done < "$file"
-  [ "$pr_count" -eq 1 ] || return 1
-  [ "$post_pr_invalid" -eq 0 ] || return 1
-  [ -n "$FM_PR_META_URL" ]
+  if [ "$pr_count" -eq 0 ]; then
+    FM_PR_META_PARSE_REASON="meta-pr-missing"
+    return 1
+  fi
+  if [ "$pr_count" -gt 1 ]; then
+    FM_PR_META_PARSE_REASON="meta-pr-duplicate"
+    return 1
+  fi
+  if [ "$post_pr_invalid" -ne 0 ]; then
+    FM_PR_META_PARSE_REASON="meta-post-pr-invalid"
+    return 1
+  fi
+  if [ -z "$FM_PR_META_URL" ]; then
+    FM_PR_META_PARSE_REASON="meta-pr-url-invalid"
+    return 1
+  fi
 }
 
 # Sidecar layout: provider, url, host, path, number, one per line. A sidecar
@@ -528,6 +544,19 @@ fm_pr_poll_publish_prepared() {
   fm_pr_regular_destination_on_device_or_absent "$FM_PR_POLL_REG_DEST" "$FM_PR_POLL_STATE_DEVICE" || return 1
   fm_pr_regular_destination_on_device_or_absent "$FM_PR_POLL_CHECK_DEST" "$FM_PR_POLL_STATE_DEVICE" || return 1
 
+  # Neutralize any existing runnable check FIRST, before data/registration are
+  # touched. A replacement publish would otherwise leave a live check paired
+  # with a mid-swap sibling for the whole rename sequence; a concurrent
+  # startup scan hitting that window sees a runnable check whose data or
+  # registration does not match it yet, which is exactly the mixed generation
+  # this ordering rules out. Absent-check is an ordinary, well-understood
+  # state (same as a task that has never armed a poll), so a scan mid-publish
+  # only ever sees "no check yet" or the fully consistent new generation.
+  if [ -e "$FM_PR_POLL_CHECK_DEST" ] || [ -L "$FM_PR_POLL_CHECK_DEST" ]; then
+    rm -f -- "$FM_PR_POLL_CHECK_DEST" || return 1
+    [ ! -e "$FM_PR_POLL_CHECK_DEST" ] && [ ! -L "$FM_PR_POLL_CHECK_DEST" ] || return 1
+  fi
+
   if ! mv -f -- "$FM_PR_POLL_DATA_TMP" "$FM_PR_POLL_DATA_DEST"; then
     fm_pr_poll_revoke_final || true
     return 1
@@ -579,43 +608,51 @@ fm_pr_poll_publish_prepared() {
   fi
 }
 
+# Sets FM_PR_POLL_ARTIFACTS_INVALID_REASON to a stable code on failure (empty
+# on success), so a caller can durably record WHY a poll was rejected instead
+# of only that it was. File/hash/inode/registration reasons stay distinct from
+# the metadata-binding reasons fm_pr_metadata_identity_parse exposes: the two
+# classes are diagnosed from different evidence and must never collapse into
+# one generic code.
 fm_pr_poll_artifacts_valid() {
   local state=$1 id=$2 template=$3 state_device check data registration meta data_hash template_hash data_identity check_identity
-  fm_pr_task_id_valid "$id" || return 1
-  [ -d "$state" ] && [ ! -L "$state" ] || return 1
-  state_device=$(fm_pr_file_device "$state") || return 1
+  FM_PR_POLL_ARTIFACTS_INVALID_REASON=
+  fm_pr_task_id_valid "$id" || { FM_PR_POLL_ARTIFACTS_INVALID_REASON="bad-task-id"; return 1; }
+  [ -d "$state" ] && [ ! -L "$state" ] || { FM_PR_POLL_ARTIFACTS_INVALID_REASON="bad-state-dir"; return 1; }
+  state_device=$(fm_pr_file_device "$state") || { FM_PR_POLL_ARTIFACTS_INVALID_REASON="state-device"; return 1; }
   check="$state/$id.check.sh"
   data="$state/$id.pr-poll"
   registration="$state/$id.pr-poll-registration"
   meta="$state/$id.meta"
-  fm_pr_private_file_valid "$check" 600 "$state_device" || return 1
-  fm_pr_private_file_valid "$data" 600 "$state_device" || return 1
-  fm_pr_private_file_valid "$registration" 600 "$state_device" || return 1
-  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
-  [ "$(fm_pr_file_link_count "$meta")" = 1 ] || return 1
-  cmp -s "$template" "$check" || return 1
-  fm_pr_poll_data_parse "$data" || return 1
-  data_hash=$(fm_pr_sha256 "$data") || return 1
-  template_hash=$(fm_pr_sha256 "$check") || return 1
-  data_identity=$(fm_pr_file_identity "$data") || return 1
-  check_identity=$(fm_pr_file_identity "$check") || return 1
-  fm_pr_poll_registration_parse "$registration" || return 1
-  [ "$FM_PR_REG_ID" = "$id" ] || return 1
-  [ "$FM_PR_REG_PROVIDER" = "$FM_PR_DATA_PROVIDER" ] || return 1
-  [ "$FM_PR_REG_URL" = "$FM_PR_DATA_URL" ] || return 1
-  [ "$FM_PR_REG_HOST" = "$FM_PR_DATA_HOST" ] || return 1
-  [ "$FM_PR_REG_PATH" = "$FM_PR_DATA_PATH" ] || return 1
-  [ "$FM_PR_REG_NUMBER" = "$FM_PR_DATA_NUMBER" ] || return 1
-  [ "$FM_PR_REG_DATA_HASH" = "$data_hash" ] || return 1
-  [ "$FM_PR_REG_TEMPLATE_HASH" = "$template_hash" ] || return 1
-  [ "$FM_PR_REG_DATA_IDENTITY" = "$data_identity" ] || return 1
-  [ "$FM_PR_REG_CHECK_IDENTITY" = "$check_identity" ] || return 1
-  fm_pr_metadata_identity_parse "$meta" || return 1
-  [ "$FM_PR_META_PROVIDER" = "$FM_PR_DATA_PROVIDER" ] || return 1
-  [ "$FM_PR_META_URL" = "$FM_PR_DATA_URL" ] || return 1
-  [ "$FM_PR_META_HOST" = "$FM_PR_DATA_HOST" ] || return 1
-  [ "$FM_PR_META_PATH" = "$FM_PR_DATA_PATH" ] || return 1
-  [ "$FM_PR_META_NUMBER" = "$FM_PR_DATA_NUMBER" ]
+  fm_pr_private_file_valid "$check" 600 "$state_device" || { FM_PR_POLL_ARTIFACTS_INVALID_REASON="check-file"; return 1; }
+  fm_pr_private_file_valid "$data" 600 "$state_device" || { FM_PR_POLL_ARTIFACTS_INVALID_REASON="data-file"; return 1; }
+  fm_pr_private_file_valid "$registration" 600 "$state_device" || { FM_PR_POLL_ARTIFACTS_INVALID_REASON="registration-file"; return 1; }
+  [ -f "$meta" ] && [ ! -L "$meta" ] || { FM_PR_POLL_ARTIFACTS_INVALID_REASON="meta-file"; return 1; }
+  [ "$(fm_pr_file_link_count "$meta")" = 1 ] || { FM_PR_POLL_ARTIFACTS_INVALID_REASON="meta-hardlinked"; return 1; }
+  cmp -s "$template" "$check" || { FM_PR_POLL_ARTIFACTS_INVALID_REASON="check-mismatch"; return 1; }
+  fm_pr_poll_data_parse "$data" || { FM_PR_POLL_ARTIFACTS_INVALID_REASON="data-parse"; return 1; }
+  data_hash=$(fm_pr_sha256 "$data") || { FM_PR_POLL_ARTIFACTS_INVALID_REASON="data-hash"; return 1; }
+  template_hash=$(fm_pr_sha256 "$check") || { FM_PR_POLL_ARTIFACTS_INVALID_REASON="template-hash"; return 1; }
+  data_identity=$(fm_pr_file_identity "$data") || { FM_PR_POLL_ARTIFACTS_INVALID_REASON="data-identity"; return 1; }
+  check_identity=$(fm_pr_file_identity "$check") || { FM_PR_POLL_ARTIFACTS_INVALID_REASON="check-identity"; return 1; }
+  fm_pr_poll_registration_parse "$registration" || { FM_PR_POLL_ARTIFACTS_INVALID_REASON="registration-parse"; return 1; }
+  [ "$FM_PR_REG_ID" = "$id" ] || { FM_PR_POLL_ARTIFACTS_INVALID_REASON="registration-id-mismatch"; return 1; }
+  [ "$FM_PR_REG_PROVIDER" = "$FM_PR_DATA_PROVIDER" ] || { FM_PR_POLL_ARTIFACTS_INVALID_REASON="registration-identity-mismatch"; return 1; }
+  [ "$FM_PR_REG_URL" = "$FM_PR_DATA_URL" ] || { FM_PR_POLL_ARTIFACTS_INVALID_REASON="registration-identity-mismatch"; return 1; }
+  [ "$FM_PR_REG_HOST" = "$FM_PR_DATA_HOST" ] || { FM_PR_POLL_ARTIFACTS_INVALID_REASON="registration-identity-mismatch"; return 1; }
+  [ "$FM_PR_REG_PATH" = "$FM_PR_DATA_PATH" ] || { FM_PR_POLL_ARTIFACTS_INVALID_REASON="registration-identity-mismatch"; return 1; }
+  [ "$FM_PR_REG_NUMBER" = "$FM_PR_DATA_NUMBER" ] || { FM_PR_POLL_ARTIFACTS_INVALID_REASON="registration-identity-mismatch"; return 1; }
+  [ "$FM_PR_REG_DATA_HASH" = "$data_hash" ] || { FM_PR_POLL_ARTIFACTS_INVALID_REASON="registration-data-hash-mismatch"; return 1; }
+  [ "$FM_PR_REG_TEMPLATE_HASH" = "$template_hash" ] || { FM_PR_POLL_ARTIFACTS_INVALID_REASON="registration-template-hash-mismatch"; return 1; }
+  [ "$FM_PR_REG_DATA_IDENTITY" = "$data_identity" ] || { FM_PR_POLL_ARTIFACTS_INVALID_REASON="registration-data-identity-mismatch"; return 1; }
+  [ "$FM_PR_REG_CHECK_IDENTITY" = "$check_identity" ] || { FM_PR_POLL_ARTIFACTS_INVALID_REASON="registration-check-identity-mismatch"; return 1; }
+  fm_pr_metadata_identity_parse "$meta" || { FM_PR_POLL_ARTIFACTS_INVALID_REASON=${FM_PR_META_PARSE_REASON:-"metadata-parse"}; return 1; }
+  [ "$FM_PR_META_PROVIDER" = "$FM_PR_DATA_PROVIDER" ] || { FM_PR_POLL_ARTIFACTS_INVALID_REASON="metadata-identity-mismatch"; return 1; }
+  [ "$FM_PR_META_URL" = "$FM_PR_DATA_URL" ] || { FM_PR_POLL_ARTIFACTS_INVALID_REASON="metadata-identity-mismatch"; return 1; }
+  [ "$FM_PR_META_HOST" = "$FM_PR_DATA_HOST" ] || { FM_PR_POLL_ARTIFACTS_INVALID_REASON="metadata-identity-mismatch"; return 1; }
+  [ "$FM_PR_META_PATH" = "$FM_PR_DATA_PATH" ] || { FM_PR_POLL_ARTIFACTS_INVALID_REASON="metadata-identity-mismatch"; return 1; }
+  # shellcheck disable=SC2034 # Read by callers after fm_pr_poll_artifacts_valid returns.
+  [ "$FM_PR_META_NUMBER" = "$FM_PR_DATA_NUMBER" ] || { FM_PR_POLL_ARTIFACTS_INVALID_REASON="metadata-identity-mismatch"; return 1; }
 }
 
 fm_pr_poll_snapshot_capture() {

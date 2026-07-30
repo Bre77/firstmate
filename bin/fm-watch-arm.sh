@@ -29,6 +29,10 @@
 #   watcher: attached pid=<N> (beacon <age>s)            - a live+fresh successor holds the lock;
 #                                                          this arm attaches and follows it
 #   watcher: FAILED - no live watcher with a fresh beacon  - could not confirm one
+#   watcher: FAILED - migration-in-progress, no watcher to confirm yet
+#                                                        - the confirmation window elapsed while a
+#                                                          verified fm-pr-check-migrate.sh held the
+#                                                          exclusion lock; not a dead watcher
 #   watcher: FAILED - cycle ended without an actionable reason
 #                                                        - a clean cycle ended with no wake and no
 #                                                          verified healthy successor
@@ -235,6 +239,27 @@ report_attached() {
   echo "watcher: attached pid=$HEALTHY_PID (beacon ${age}s)"
 }
 
+# Recognizes a verified migration holding the generic watcher-exclusion lock:
+# a live pid with NO watcher identity files (a real watcher always publishes
+# pid-identity/watcher-path/fm-home) whose command line is genuinely
+# fm-pr-check-migrate.sh, not just any stray process. Distinguishes a long but
+# legitimate migration from a genuinely dead or missing watcher so a confirm
+# timeout during migration reports the accurate cause.
+migration_lock_owner() {
+  local ownerdir pid identity cmd
+  ownerdir=$(fm_lock_read_dir "$WATCH_LOCK" 2>/dev/null) || return 1
+  [ -n "$ownerdir" ] || return 1
+  pid=$(cat "$ownerdir/pid" 2>/dev/null || true)
+  fm_pid_alive "$pid" || return 1
+  identity=$(cat "$ownerdir/pid-identity" 2>/dev/null || true)
+  [ -z "$identity" ] || return 1
+  cmd=$(ps -p "$pid" -o command= 2>/dev/null) || return 1
+  case "$cmd" in
+    *fm-pr-check-migrate.sh*) return 0 ;;
+  esac
+  return 1
+}
+
 # Give a successor the same bounded confirmation window used for a fresh child.
 # Adapter-owned continuations normally win immediately, but the bound avoids a
 # false failure when process-close delivery and lock publication cross briefly.
@@ -435,9 +460,18 @@ owned_child_finished() {
 
   reason_type="nonzero-exit"
   [ "$signal" = none ] || reason_type="signal-exit"
-  cycle_log_append "$rc" "$signal" "$reason_type" none
-  print_watch_output "$child_out"
-  if ! grep -q '^watcher: FAILED' "$child_out" 2>/dev/null; then
+  if grep -q '^watcher: FAILED' "$child_out" 2>/dev/null; then
+    cycle_log_append "$rc" "$signal" "$reason_type" none
+    print_watch_output "$child_out"
+  elif migration_lock_owner; then
+    # The freshly forked child could not win the singleton because a verified
+    # migration genuinely holds it; that is not an unexplained watcher death.
+    cycle_log_append "$rc" "$signal" migration-in-progress none
+    print_watch_output "$child_out"
+    echo "watcher: FAILED - migration-in-progress, no watcher to confirm yet"
+  else
+    cycle_log_append "$rc" "$signal" "$reason_type" none
+    print_watch_output "$child_out"
     echo "watcher: FAILED - watcher cycle exited $rc without an actionable reason"
   fi
   rm -f "$child_out" 2>/dev/null || true
@@ -487,6 +521,11 @@ print_watch_output "$child_out"
 cleanup_child
 wait "$child" 2>/dev/null
 rc=$?
+if migration_lock_owner; then
+  cycle_log_append "$rc" "$(cycle_signal_name "$rc")" migration-in-progress none
+  echo "watcher: FAILED - migration-in-progress, no watcher to confirm yet"
+  exit 1
+fi
 cycle_log_append "$rc" "$(cycle_signal_name "$rc")" confirmation-timeout none
 echo "watcher: FAILED - no live watcher with a fresh beacon"
 exit 1
