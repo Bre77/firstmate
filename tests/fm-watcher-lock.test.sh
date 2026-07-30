@@ -1012,24 +1012,22 @@ test_arm_fails_loud_when_no_fresh_watcher_confirmable() {
 }
 
 test_arm_reports_migration_in_progress_instead_of_generic_failure() {
-  local dir state fakebin armout migrate_script live armpid status
+  local dir state fakebin armout live armpid status
   dir=$(make_case arm-migration-in-progress)
   state="$dir/state"
   fakebin="$dir/fakebin"
   armout="$dir/arm.out"
   mark_pr_check_migration_complete "$state"
-  migrate_script="$dir/fm-pr-check-migrate.sh"
-  cat > "$migrate_script" <<'SH'
-#!/usr/bin/env bash
-sleep 300
-SH
-  chmod +x "$migrate_script"
-  "$migrate_script" &
-  live=$!
   # A live migration holds the generic exclusion lock as a plain pid with no
   # watcher identity fields (a real watcher always publishes those too), and
   # its command line is genuinely fm-pr-check-migrate.sh - the verified shape
   # the arm diagnostic now recognizes instead of guessing off a bare pid.
+  # `exec -a` sets that argv[0] on the real sleep process directly, in place,
+  # rather than backgrounding a wrapper script whose own child would be
+  # orphaned (and keep this test's stdout pipe open for the full sleep) the
+  # instant the wrapper alone is killed below.
+  ( exec -a fm-pr-check-migrate.sh sleep 300 ) &
+  live=$!
   mkdir "$state/.watch.lock"
   printf '%s\n' "$live" > "$state/.watch.lock/pid"
   touch -t 200001010000 "$state/.last-watcher-beat"
