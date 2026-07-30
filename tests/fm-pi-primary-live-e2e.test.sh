@@ -17,8 +17,9 @@ fail() {
   exit 1
 }
 
-command -v pi >/dev/null 2>&1 || fail "pi not found"
-command -v tmux >/dev/null 2>&1 || fail "tmux not found"
+for tool in pi tmux; do
+  command -v "$tool" >/dev/null 2>&1 || { echo "skip: $tool not found"; exit 0; }
+done
 
 TMUX=$(command -v tmux)
 SOCKET="fm-pi-live-e2e-$$"

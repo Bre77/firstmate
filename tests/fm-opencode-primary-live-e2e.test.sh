@@ -16,9 +16,9 @@ fail() {
   exit 1
 }
 
-command -v opencode >/dev/null 2>&1 || fail "opencode not found"
-command -v tmux >/dev/null 2>&1 || fail "tmux not found"
-command -v sqlite3 >/dev/null 2>&1 || fail "sqlite3 not found"
+for tool in opencode tmux sqlite3; do
+  command -v "$tool" >/dev/null 2>&1 || { echo "skip: $tool not found"; exit 0; }
+done
 
 TMUX=$(command -v tmux)
 SOCKET="fm-opencode-live-e2e-$$"

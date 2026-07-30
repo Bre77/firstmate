@@ -15,8 +15,9 @@ fail() {
   exit 1
 }
 
-command -v grok >/dev/null 2>&1 || fail "grok not found"
-command -v tmux >/dev/null 2>&1 || fail "tmux not found"
+for tool in grok tmux; do
+  command -v "$tool" >/dev/null 2>&1 || { echo "skip: $tool not found"; exit 0; }
+done
 
 TMUX=$(command -v tmux)
 SOCKET="fm-grok-live-e2e-$$"
