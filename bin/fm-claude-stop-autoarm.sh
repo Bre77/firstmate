@@ -24,6 +24,12 @@
 #     lock (state/.claude-autoarm.lock) admits exactly one owner; every other
 #     concurrent firing exits 0 without translating, which keeps one event
 #     epoch on exactly one recovery turn.
+#   - Covered: before foregrounding the arm wrapper, if an identity-matched
+#     watcher is already healthy, a separate model/manual arm already owns it
+#     and will deliver its own actionable close. This hook records a covered
+#     epoch and exits silently rather than attaching, which is what previously
+#     produced a false "cycle ended without an actionable reason" failure when
+#     the owning cycle closed before this hook's attached observer could see it.
 #   - Foreground arm: the owner runs bin/fm-watch-arm.sh in the FOREGROUND of
 #     this hook-owned process tree (never shell &); Claude owns the process
 #     group, so its timeout/session teardown kills arm and watcher together.
@@ -53,6 +59,7 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 GRACE=${FM_GUARD_GRACE:-300}
 OWNER_LOCK="$STATE/.claude-autoarm.lock"
 EPOCH="$STATE/.claude-autoarm-epoch"
+WATCH="$SCRIPT_DIR/fm-watch.sh"
 
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
@@ -124,6 +131,17 @@ write_epoch() {  # <outcome>
     && mv -f "$tmp" "$EPOCH" 2>/dev/null
   rm -f "$tmp" 2>/dev/null || true
 }
+
+# --- covered: a healthy externally-owned arm already delivers its own close --
+# Checked with the same identity-matched liveness predicate the guard and arm
+# wrapper use, so this can never diverge from what "healthy" means elsewhere.
+# Attaching here would only ever produce a false failure: an attached observer
+# cannot see the owning cycle's captured output, so its ordinary actionable
+# close looks like an unexplained exit once the owner goes away.
+if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
+  write_epoch covered
+  exit 0
+fi
 
 write_epoch arming
 

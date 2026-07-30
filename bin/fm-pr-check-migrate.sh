@@ -498,6 +498,7 @@ MIGRATION_URL=
 MIGRATION_HOST=
 MIGRATION_PATH=
 MIGRATION_NUMBER=
+MIGRATION_REASON=
 metadata_pr_is_canonical() {
   local meta=$1
   MIGRATION_PROVIDER=
@@ -505,12 +506,40 @@ metadata_pr_is_canonical() {
   MIGRATION_HOST=
   MIGRATION_PATH=
   MIGRATION_NUMBER=
-  fm_pr_metadata_identity_parse "$meta" || return 1
+  MIGRATION_REASON=
+  fm_pr_metadata_identity_parse "$meta" || {
+    MIGRATION_REASON=${FM_PR_META_PARSE_REASON:-"metadata-parse"}
+    return 1
+  }
   MIGRATION_PROVIDER=$FM_PR_META_PROVIDER
   MIGRATION_URL=$FM_PR_META_URL
   MIGRATION_HOST=$FM_PR_META_HOST
   MIGRATION_PATH=$FM_PR_META_PATH
   MIGRATION_NUMBER=$FM_PR_META_NUMBER
+}
+
+# Durable, reason-coded record of an ambiguous classification: the stable
+# reason from metadata_pr_is_canonical, plus a content-addressed private copy
+# of the exact metadata bytes it classified. A later canonical re-arm rewrites
+# state/<id>.meta in place, so without this snapshot the classified bytes are
+# gone the moment the task's poll is next successfully armed.
+record_ambiguous_metadata_reason() {
+  local id=$1 meta=$2 reason=$3 hash snapshot dest
+  hash=$(fm_pr_sha256 "$meta" 2>/dev/null || true)
+  snapshot=none
+  if [ -n "$hash" ] && [ -f "$meta" ] && [ ! -L "$meta" ]; then
+    dest="$QUARANTINE/$id.ambiguous-meta.$hash"
+    if [ -e "$dest" ] || [ -L "$dest" ]; then
+      fm_pr_private_file_valid "$dest" 600 "$STATE_DEVICE" && cmp -s "$meta" "$dest" && snapshot=$dest
+    elif ensure_quarantine_dir; then
+      cp -- "$meta" "$dest" 2>/dev/null \
+        && chmod 0600 "$dest" 2>/dev/null \
+        && fm_pr_private_file_valid "$dest" 600 "$STATE_DEVICE" \
+        && cmp -s "$meta" "$dest" \
+        && snapshot=$dest
+    fi
+  fi
+  record_diagnostic "task $id: ambiguous classification reason=${reason:-unknown} meta_sha256=${hash:-unavailable} meta_snapshot=$snapshot" || true
 }
 
 quarantine_artifact() {
@@ -1061,6 +1090,7 @@ if migration_needed; then
           record_canonical_failure "$id" || diagnostics_failed=1
         fi
       else
+        record_ambiguous_metadata_reason "$id" "$meta" "$MIGRATION_REASON"
         message="task $id: migration outcome tracking started before legacy poll handling"
         if ! ensure_diagnostic_obligation "$prefix" pending-ambiguous "$message" \
           || ! process_diagnostic_obligations; then
