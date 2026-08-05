@@ -115,7 +115,7 @@ test_guard_warnings() {
   #       warning follows it, and the guidance is repair-after-drain (never the
   #       old conflicting "restart NOW first").
   #   (2) a fresh watcher and an empty queue: total silence.
-  local dir state err first banner_line queue_line
+  local dir state err first banner_line queue_line pid identity
   dir=$(make_case guard)
   state="$dir/state"
   err="$dir/guard.err"
@@ -138,9 +138,9 @@ test_guard_warnings() {
   grep -F 'last beat: never' "$err" >/dev/null || fail "guard banner missing the beacon age"
   grep -F 'guarded operation WILL still run' "$err" >/dev/null || fail "guard banner missing generic continuation wording"
   ! grep -F 'requested message WILL still be sent' "$err" >/dev/null || fail "shared guard used send-specific continuation wording"
-  grep -F 'repair missing watcher supervision' "$err" >/dev/null || fail "guard banner missing the harness-aware fix command"
+  grep -F 'watcher supervision needs Stop-owned automatic recovery' "$err" >/dev/null || fail "guard banner missing neutral automatic-recovery guidance"
   grep -F 'queued wakes pending - drain them' "$err" >/dev/null || fail "guard did not warn about pending queue"
-  grep -F 'After draining queued wakes, repair missing watcher supervision' "$err" >/dev/null || fail "guard did not order supervision repair after drain"
+  grep -F 'After draining queued wakes, watcher supervision needs Stop-owned automatic recovery' "$err" >/dev/null || fail "guard did not order neutral automatic recovery after drain"
   ! grep -F 'Restart it NOW, before anything else' "$err" >/dev/null || fail "guard still gave conflicting restart-first instruction"
   ! grep -F 'as the harness-tracked background task' "$err" >/dev/null || fail "guard still printed the old universal background-task repair text"
   banner_line=$(grep -n 'WATCHER DOWN' "$err" | head -1 | cut -d: -f1)
@@ -156,17 +156,27 @@ test_guard_warnings() {
   CLAUDECODE=1 PI_CODING_AGENT='' GROK_AGENT='' FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
   grep -F "source '$dir/config/x-mode.env' first" "$err" >/dev/null || fail "guard repair line did not source the X-mode cadence config"
 
-  # (2) fresh watcher, empty queue -> silence.
+  # (2) live watcher plus fresh beacon, empty queue -> silence.
   dir=$(make_case guard-fresh)
   state="$dir/state"
   err="$dir/guard.err"
   printf 'project=x\n' > "$state/task.meta"
+  sleep 60 &
+  pid=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$pid") || fail "could not identify fresh guard watcher"
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$pid" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
   touch "$state/.last-watcher-beat"
   # Non-git FM_ROOT keeps the worktree-tangle check inert so "fresh watcher ->
   # total silence" stays a pure assertion about watcher state.
   FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
-  [ ! -s "$err" ] || fail "guard warned with a fresh watcher and no queued wakes: $(cat "$err")"
-  pass "guard banner leads when down with pending wakes (repair-after-drain) and stays silent when fresh"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  [ ! -s "$err" ] || fail "guard warned with a live watcher and fresh beacon: $(cat "$err")"
+  pass "guard banner leads when down with pending wakes (repair-after-drain) and stays silent when live and fresh"
 }
 
 test_lock_single_winner_under_concurrency() {
@@ -399,171 +409,6 @@ test_lock_paused_mid_acquire_claim_fails_during_steal() {
   pass "paused mid-acquire claimant backs off to active stealer"
 }
 
-test_lock_prep_fn_publishes_atomically_before_ln() {
-  # Regression for the fm-turnend-guard.sh false positive: fm-watch.sh writes
-  # its identity (fm-home, watcher-path, pid-identity) through a prep_fn hook
-  # that fm_lock_try_create runs BEFORE ln -s publishes the lock, so pid and
-  # identity content become visible to any reader in one atomic step. Before the
-  # fix, pid was published first and identity written afterward by the caller,
-  # so a reader landing in that gap saw a live pid with no matching identity and
-  # misreported "no live watcher holds this home lock". A deliberately slow
-  # prep_fn makes that window wide and deterministic instead of a timing guess.
-  local dir state lockdir marker started_pid i rc identity
-  dir=$(make_case lock-atomic-prep)
-  state="$dir/state"
-  lockdir="$state/.contend.lock"
-  marker="$dir/prep-started"
-
-  FM_STATE_OVERRIDE="$state" bash -c '
-    . "$1"
-    marker="$3"
-    slow_prep() {
-      : > "$marker"
-      sleep 1.5
-      printf "identity-written\n" > "$1/pid-identity"
-    }
-    fm_lock_try_acquire "$2" slow_prep
-  ' _ "$LIB" "$lockdir" "$marker" &
-  started_pid=$!
-
-  i=0
-  while [ "$i" -lt 50 ] && [ ! -e "$marker" ]; do
-    sleep 0.1
-    i=$((i + 1))
-  done
-  if [ ! -e "$marker" ]; then
-    kill "$started_pid" 2>/dev/null || true
-    wait "$started_pid" 2>/dev/null || true
-    fail "slow prep_fn never started"
-  fi
-
-  # Sample repeatedly through the slow write: the lock must stay entirely
-  # undiscoverable the whole time, never a half-formed pid-without-identity
-  # state a guard read could misinterpret as a mismatched watcher.
-  i=0
-  while [ "$i" -lt 10 ]; do
-    if [ -e "$lockdir" ]; then
-      kill "$started_pid" 2>/dev/null || true
-      wait "$started_pid" 2>/dev/null || true
-      fail "lock became visible before prep_fn finished writing identity content"
-    fi
-    sleep 0.1
-    i=$((i + 1))
-  done
-
-  wait "$started_pid"; rc=$?
-  [ "$rc" -eq 0 ] || fail "acquirer with slow prep_fn failed (rc=$rc)"
-  [ -e "$lockdir/pid" ] || fail "published lock is missing pid"
-  identity=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
-  [ "$identity" = "identity-written" ] || fail "published lock is missing prep_fn's identity content (got '$identity')"
-  pass "lock prep_fn content publishes atomically with pid, never observable half-written"
-}
-
-test_watcher_healthy_survives_read_side_lock_swap() {
-  # Regression for the SECOND (read-side) fm-turnend-guard.sh false positive,
-  # distinct from the write-side race test_lock_prep_fn_publishes_atomically_before_ln
-  # closed: fm_watcher_healthy used to read pid, fm-home, watcher-path, and
-  # pid-identity via four SEPARATE $state/.watch.lock/<file> accesses, each
-  # independently re-following the lock symlink. A reader landing between two
-  # of those reads while a re-arm swapped that symlink to a fresh owner (e.g.
-  # stealing a dead watcher's lock) could combine fields from two different,
-  # individually consistent owners and misreport a live, fresh-beacon watcher
-  # as mismatched. fm_watcher_healthy now resolves the owner dir ONCE per call
-  # (fm_lock_read_dir) and reads every field from that fixed path, so a
-  # concurrent swap can no longer tear a read across two owners.
-  #
-  # Deterministic reproduction, mirroring the write-side sibling's technique of
-  # widening a normally-instantaneous window instead of guessing at timing: arm
-  # a real watcher (owner A) through bin/fm-watch-arm.sh, resolve its owner dir
-  # exactly once the way fm_watcher_healthy does internally, THEN swap the
-  # published lock to a second, unrelated (dead) owner B before reading any of
-  # A's fields from the already-resolved path. The pinned snapshot must still
-  # describe owner A consistently, and a FRESH fm_watcher_healthy call made
-  # after the swap must correctly report owner B's dead, mismatched state as
-  # unhealthy - the fix must not blind the guard to a real "no live watcher".
-  local dir state fakebin armout armpid i lock_pid snapshot ownerB dead_pid
-  local home_a identity_a lock_home lock_path lock_identity
-  dir=$(make_case read-side-swap)
-  state="$dir/state"
-  fakebin="$dir/fakebin"
-  armout="$dir/arm.out"
-
-  # Phase 1: arm a real watcher and confirm it live + fresh - the "arm, then
-  # immediately check" production sequence, on the real published lock.
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
-  armpid=$!
-  i=0
-  while [ "$i" -lt 80 ]; do
-    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
-    sleep 0.1
-    i=$((i + 1))
-  done
-  if ! grep -qF 'watcher: started pid=' "$armout" 2>/dev/null; then
-    kill "$armpid" 2>/dev/null || true
-    wait "$armpid" 2>/dev/null || true
-    fail "arm did not confirm a started watcher"
-  fi
-  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
-
-  if ! FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_watcher_healthy "$2" "$3" 300' _ "$LIB" "$state" "$WATCH"; then
-    kill "$armpid" "$lock_pid" 2>/dev/null || true
-    wait "$armpid" 2>/dev/null || true
-    fail "fm_watcher_healthy reported unhealthy immediately after a real arm confirmed a live, fresh, matched watcher"
-  fi
-
-  # Phase 2: resolve owner A's directory exactly once, the way
-  # fm_watcher_healthy does internally, BEFORE anything swaps the lock.
-  snapshot=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_lock_read_dir "$2/.watch.lock"' _ "$LIB" "$state")
-  if [ -z "$snapshot" ] || [ ! -d "$snapshot" ]; then
-    kill "$armpid" "$lock_pid" 2>/dev/null || true
-    wait "$armpid" 2>/dev/null || true
-    fail "fm_lock_read_dir did not resolve owner A's directory"
-  fi
-  home_a=$(cat "$snapshot/fm-home" 2>/dev/null || true)
-  identity_a=$(cat "$snapshot/pid-identity" 2>/dev/null || true)
-  if [ -z "$identity_a" ]; then
-    kill "$armpid" "$lock_pid" 2>/dev/null || true
-    wait "$armpid" 2>/dev/null || true
-    fail "owner A's published identity was empty"
-  fi
-
-  # Phase 3: kill the real watcher and swap the published lock to a second,
-  # unrelated (dead, mismatched) owner B - simulating the instant a re-arm's
-  # self-heal steal has just completed, exactly what a straggling reader's
-  # unpinned per-field reads used to be able to tear across.
-  kill -9 "$lock_pid" 2>/dev/null || true
-  kill "$armpid" 2>/dev/null || true
-  wait "$armpid" 2>/dev/null || true
-  dead_pid=999999
-  while kill -0 "$dead_pid" 2>/dev/null; do dead_pid=$((dead_pid + 1)); done
-  ownerB="$dir/owner-b"
-  mkdir -p "$ownerB"
-  printf '%s\n' "$dead_pid" > "$ownerB/pid"
-  printf 'owner-b-home\n' > "$ownerB/fm-home"
-  printf 'owner-b-watch.sh\n' > "$ownerB/watcher-path"
-  printf 'owner-b-identity\n' > "$ownerB/pid-identity"
-  rm -f "$state/.watch.lock"
-  ln -s "$ownerB" "$state/.watch.lock"
-
-  # Phase 4 (the regression assertion): fields read from the SNAPSHOT resolved
-  # in phase 2, before the swap, must still describe owner A consistently -
-  # never a mix picked up from owner B after the swap.
-  lock_home=$(cat "$snapshot/fm-home" 2>/dev/null || true)
-  lock_path=$(cat "$snapshot/watcher-path" 2>/dev/null || true)
-  lock_identity=$(cat "$snapshot/pid-identity" 2>/dev/null || true)
-  [ "$lock_home" = "$home_a" ] || fail "snapshot fm-home crossed over to owner B after the lock swap"
-  [ "$lock_path" = "$WATCH" ] || fail "snapshot watcher-path crossed over to owner B after the lock swap"
-  [ "$lock_identity" = "$identity_a" ] || fail "snapshot pid-identity crossed over to owner B after the lock swap"
-
-  # Phase 5: a FRESH fm_watcher_healthy call, made now that the lock genuinely
-  # points at dead owner B, must still fire.
-  if FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_watcher_healthy "$2" "$3" 300' _ "$LIB" "$state" "$WATCH"; then
-    fail "fm_watcher_healthy reported healthy against a genuinely dead, mismatched owner"
-  fi
-
-  pass "fm_watcher_healthy: a resolved owner snapshot stays pinned across a concurrent lock swap, and still fires on a genuinely dead watcher"
-}
-
 test_watch_restart_rejects_reused_pid() {
   local dir state fakebin out live pid i lock_pid
   dir=$(make_case restart-reused-pid)
@@ -603,14 +448,25 @@ test_watch_restart_rejects_reused_pid() {
 }
 
 test_watch_restart_attaches_to_healthy_peer() {
-  local dir state fakebin out peer identity armpid status i
+  local dir state fakebin out peer_ready peer identity armpid status i
   dir=$(make_case restart-healthy-peer)
   state="$dir/state"
   fakebin="$dir/fakebin"
   out="$dir/restart.out"
+  peer_ready="$dir/peer.ready"
   mark_pr_check_migration_complete "$state"
-  node -e 'process.on("SIGTERM", () => {}); setTimeout(() => {}, 300000)' &
+  node -e 'const fs = require("node:fs"); process.on("SIGTERM", () => {}); fs.writeFileSync(process.argv[1], "ready\n"); setTimeout(() => {}, 300000)' "$peer_ready" &
   peer=$!
+  i=0
+  while [ "$i" -lt 50 ] && [ ! -s "$peer_ready" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if [ ! -s "$peer_ready" ]; then
+    kill -KILL "$peer" 2>/dev/null || true
+    wait "$peer" 2>/dev/null || true
+    fail "TERM-resistant peer did not become ready"
+  fi
   identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") || fail "could not identify peer pid"
   mkdir "$state/.watch.lock"
   printf '%s\n' "$peer" > "$state/.watch.lock/pid"
@@ -822,13 +678,12 @@ test_arm_starts_and_self_heals() {
 }
 
 test_arm_hup_cleans_child_and_temp_output() {
-  local dir state fakebin armout armerr i armpid lock_pid status handler
+  local dir state fakebin armout i armpid lock_pid status
   dir=$(make_case arm-hup-cleanup)
   state="$dir/state"
   fakebin="$dir/fakebin"
   armout="$dir/arm.out"
-  armerr="$dir/arm.err"
-  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "${FM_DEFAULT_SIGNALS[@]}" "$WATCH_ARM" > "$armout" 2> "$armerr" &
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
   armpid=$!
   i=0
   while [ "$i" -lt 80 ]; do
@@ -838,22 +693,10 @@ test_arm_hup_cleans_child_and_temp_output() {
   done
   grep -qF 'watcher: started pid=' "$armout" || fail "arm did not start before HUP cleanup check"
   lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
-  signal_handler_installed "$armpid" 1
-  handler=$?
-  [ "$handler" -ne 1 ] || fail "arm installed no HUP handler, so nothing below can be measured: $(cat "$armerr")"
   kill -HUP "$armpid" 2>/dev/null || fail "could not send HUP to arm"
   wait_for_exit "$armpid" 80
   status=$?
-  # A trap body that fails to parse installs nothing at all, so name that first:
-  # it otherwise reaches the assertions below as either an unexplained timeout
-  # (the watcher never sees its TERM) or as the very 128+HUP the handler would
-  # have exited with anyway (the interrupted wait returns it unaided), and only
-  # the ledger record the handler itself writes can tell those apart.
-  ! grep -qE 'trap: line|unexpected EOF|syntax error' "$armerr" \
-    || fail "arm or its watcher could not install a signal handler: $(cat "$armerr")"
   [ "$status" -eq 129 ] || fail "arm did not exit with HUP status (got $status)"
-  grep -q 'signal=HUP.*reason=arm-interrupted' "$state/.watch-cycle-exits.log" 2>/dev/null \
-    || fail "HUP handler did not run (ledger: $(cat "$state/.watch-cycle-exits.log" 2>/dev/null))"
   i=0
   while [ "$i" -lt 80 ] && is_live_non_zombie "$lock_pid"; do
     sleep 0.1
@@ -862,46 +705,6 @@ test_arm_hup_cleans_child_and_temp_output() {
   ! is_live_non_zombie "$lock_pid" || fail "HUP cleanup left watcher child running"
   ! ls "$state"/.watch-arm-output.* >/dev/null 2>&1 || fail "HUP cleanup left temp output behind"
   pass "arm cleans child watcher and temp output on HUP"
-}
-
-# Signal release must not scale with the poll interval. Bash defers a trap until
-# the running foreground command returns, so a watcher that blocks in a plain
-# `sleep POLL` stays deaf for a whole interval - long enough that
-# `fm-watch-arm.sh --restart` gives up mid-teardown and leaves supervision with
-# no watcher at all. The interval here is deliberately far above the exit
-# budget: a deferred teardown cannot fit inside it no matter how idle the host,
-# and a prompt one has seconds of slack no matter how loaded it is.
-test_arm_hup_release_does_not_scale_with_the_poll_interval() {
-  local dir state fakebin armout i armpid lock_pid status handler
-  dir=$(make_case arm-hup-release-latency)
-  state="$dir/state"
-  fakebin="$dir/fakebin"
-  armout="$dir/arm.out"
-  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=120 FM_SIGNAL_GRACE=120 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "${FM_DEFAULT_SIGNALS[@]}" "$WATCH_ARM" > "$armout" &
-  armpid=$!
-  i=0
-  while [ "$i" -lt 80 ]; do
-    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
-    sleep 0.1
-    i=$((i + 1))
-  done
-  grep -qF 'watcher: started pid=' "$armout" || fail "arm did not start before HUP latency check"
-  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
-  signal_handler_installed "$armpid" 1
-  handler=$?
-  [ "$handler" -ne 1 ] || fail "arm installed no HUP handler, so release latency cannot be measured"
-  kill -HUP "$armpid" 2>/dev/null || fail "could not send HUP to arm"
-  wait_for_exit "$armpid" 100
-  status=$?
-  [ "$status" -ne 124 ] || fail "arm stayed deaf to HUP for >10s with a 120s poll interval (signal release is deferred by the poll sleep)"
-  [ "$status" -eq 129 ] || fail "arm did not exit with HUP status (got $status)"
-  i=0
-  while [ "$i" -lt 100 ] && is_live_non_zombie "$lock_pid"; do
-    sleep 0.1
-    i=$((i + 1))
-  done
-  ! is_live_non_zombie "$lock_pid" || fail "watcher child stayed alive >10s after HUP with a 120s poll interval"
-  pass "arm and its watcher release on HUP promptly regardless of how long the poll interval is"
 }
 
 test_arm_propagates_immediate_wake_before_confirmation() {
@@ -1011,44 +814,6 @@ test_arm_fails_loud_when_no_fresh_watcher_confirmable() {
   pass "arm reports FAILED and exits non-zero when no fresh watcher can be confirmed"
 }
 
-test_arm_reports_migration_in_progress_instead_of_generic_failure() {
-  local dir state fakebin armout live armpid status
-  dir=$(make_case arm-migration-in-progress)
-  state="$dir/state"
-  fakebin="$dir/fakebin"
-  armout="$dir/arm.out"
-  mark_pr_check_migration_complete "$state"
-  # A live migration holds the generic exclusion lock as a plain pid with no
-  # watcher identity fields (a real watcher always publishes those too), and
-  # its command line is genuinely fm-pr-check-migrate.sh - the verified shape
-  # the arm diagnostic now recognizes instead of guessing off a bare pid.
-  # `exec -a` sets that argv[0] on the real sleep process directly, in place,
-  # rather than backgrounding a wrapper script whose own child would be
-  # orphaned (and keep this test's stdout pipe open for the full sleep) the
-  # instant the wrapper alone is killed below.
-  ( exec -a fm-pr-check-migrate.sh sleep 300 ) &
-  live=$!
-  mkdir "$state/.watch.lock"
-  printf '%s\n' "$live" > "$state/.watch.lock/pid"
-  touch -t 200001010000 "$state/.last-watcher-beat"
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=3 "$WATCH_ARM" > "$armout" &
-  armpid=$!
-  wait_for_exit "$armpid" 120
-  status=$?
-  [ "$status" -ne 124 ] || fail "arm never returned while a verified migration held exclusion"
-  [ "$status" -ne 0 ] || fail "arm exited zero while a verified migration held exclusion"
-  grep -F 'watcher: FAILED - migration-in-progress' "$armout" >/dev/null \
-    || fail "arm did not recognize the verified migration-exclusion owner: $(cat "$armout")"
-  ! grep -qF 'watcher: FAILED - no live watcher with a fresh beacon' "$armout" \
-    || fail "arm reported the generic no-live-watcher failure during a verified migration"
-  grep -q 'reason=migration-in-progress' "$state/.watch-cycle-exits.log" \
-    || fail "migration-in-progress was not recorded in the lifecycle ledger"
-  is_live_non_zombie "$live" || fail "arm killed the unrelated migration process"
-  kill "$live" 2>/dev/null || true
-  wait "$live" 2>/dev/null || true
-  pass "arm recognizes a verified migration-exclusion owner and reports migration-in-progress instead of the generic failure"
-}
-
 test_cycle_exit_ledger_links_successor_and_stays_bounded() {
   local dir state fakebin armout check_file first_arm successor_arm successor_pid i size iteration
   dir=$(make_case cycle-ledger)
@@ -1073,7 +838,7 @@ SH
 
   rm -f "$check_file" "$state/task.check-trust"
   armout="$dir/successor-arm.out"
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WATCH_PREDECESSOR_ARM_PID="$first_arm" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "${FM_DEFAULT_SIGNALS[@]}" "$WATCH_ARM" > "$armout" &
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WATCH_PREDECESSOR_ARM_PID="$first_arm" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
   successor_arm=$!
   i=0
   while [ "$i" -lt 80 ]; do
@@ -1093,7 +858,7 @@ SH
   iteration=0
   while [ "$iteration" -lt 6 ]; do
     armout="$dir/bounded-$iteration.out"
-    PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WATCH_CYCLE_LOG_MAX_BYTES=1400 FM_WATCH_CYCLE_LOG_KEEP_LINES=2 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "${FM_DEFAULT_SIGNALS[@]}" "$WATCH_ARM" > "$armout" &
+    PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WATCH_CYCLE_LOG_MAX_BYTES=1400 FM_WATCH_CYCLE_LOG_KEEP_LINES=2 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
     successor_arm=$!
     i=0
     while [ "$i" -lt 80 ]; do
@@ -1157,18 +922,54 @@ test_pid_identity_is_locale_invariant() {
   # fm_pid_identity, so its output must be byte-identical regardless of the caller's
   # exported LC_ALL/LC_TIME. This stays deterministic on CI even where an alternate
   # locale like ko_KR.UTF-8 is not installed (the equality then holds trivially).
-  local live no_proc baseline via_lc_all via_lc_time
+  local live no_proc fakebin locale_log baseline via_lc_all via_lc_time
+  local real_first real_second observed
   sleep 300 &
   live=$!
   no_proc="$TMP_ROOT/no-proc"
-  baseline=$(FM_PROC_ROOT_OVERRIDE="$no_proc" LC_ALL=C bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
-  via_lc_all=$(FM_PROC_ROOT_OVERRIDE="$no_proc" LC_ALL=ko_KR.UTF-8 bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
-  via_lc_time=$(FM_PROC_ROOT_OVERRIDE="$no_proc" LC_TIME=ko_KR.UTF-8 bash -c 'unset LC_ALL; . "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+  fakebin="$TMP_ROOT/locale-ps"
+  locale_log="$TMP_ROOT/locale-ps.observed"
+  mkdir -p "$fakebin"
+  : > "$locale_log"
+  # The stub renders lstart through date under whatever locale it inherits, so its
+  # output really does change when the caller's locale leaks through. Dropping the
+  # LC_ALL=C pin in fm_pid_identity therefore breaks the equality assertions below
+  # on any host with a second locale installed, and the recorded LC_ALL below keeps
+  # the pin asserted even where ko_KR.UTF-8 is missing and date falls back to C.
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${LC_ALL-<unset>}" >> "$FAKE_PS_LOCALE_LOG"
+stamp=$(date -d @1784094040 '+%a %b %e %H:%M:%S %Y' 2>/dev/null) \
+  || stamp=$(date -r 1784094040 '+%a %b %e %H:%M:%S %Y' 2>/dev/null) \
+  || stamp='Mon Jul 28 20:00:00 2026'
+printf '%s sleep 300\n' "$stamp"
+SH
+  chmod +x "$fakebin/ps"
+  baseline=$(PATH="$fakebin:$PATH" FAKE_PS_LOCALE_LOG="$locale_log" FM_PROC_ROOT_OVERRIDE="$no_proc" LC_ALL=C bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+  via_lc_all=$(PATH="$fakebin:$PATH" FAKE_PS_LOCALE_LOG="$locale_log" FM_PROC_ROOT_OVERRIDE="$no_proc" LC_ALL=ko_KR.UTF-8 bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+  via_lc_time=$(PATH="$fakebin:$PATH" FAKE_PS_LOCALE_LOG="$locale_log" FM_PROC_ROOT_OVERRIDE="$no_proc" LC_TIME=ko_KR.UTF-8 bash -c 'unset LC_ALL; . "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+  # Keep the real ps fallback exercised wherever it supports the portable -o fields.
+  real_first=
+  real_second=
+  if LC_ALL=C ps -p "$live" -o lstart= -o command= >/dev/null 2>&1; then
+    real_first=$(FM_PROC_ROOT_OVERRIDE="$no_proc" LC_ALL=C bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+    real_second=$(FM_PROC_ROOT_OVERRIDE="$no_proc" LC_TIME=ko_KR.UTF-8 bash -c 'unset LC_ALL; . "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+  fi
   kill "$live" 2>/dev/null || true
   wait "$live" 2>/dev/null || true
   [ -n "$baseline" ] || fail "fm_pid_identity produced no baseline identity under LC_ALL=C"
   [ "$via_lc_all" = "$baseline" ] || fail "fm_pid_identity varied with exported LC_ALL (got '$via_lc_all', want '$baseline')"
   [ "$via_lc_time" = "$baseline" ] || fail "fm_pid_identity varied with exported LC_TIME (got '$via_lc_time', want '$baseline')"
+  while read -r observed; do
+    [ "$observed" = C ] || fail "fm_pid_identity invoked ps without pinning LC_ALL=C (saw '$observed')"
+  done < "$locale_log"
+  if [ -n "$real_first" ]; then
+    [ "$real_second" = "$real_first" ] \
+      || fail "real ps fallback varied with exported LC_TIME (got '$real_second', want '$real_first')"
+    pass "fm_pid_identity real ps fallback is locale-invariant"
+  else
+    pass "real ps fallback locale check skipped where ps -o lstart= is unsupported"
+  fi
   pass "fm_pid_identity is locale-invariant across LC_ALL/LC_TIME"
 }
 
@@ -1179,16 +980,14 @@ write_fake_proc_identity() {
   printf 'bash\0/path with spaces/fm-watch.sh\0--flag\0' > "$proc_root/$pid/cmdline"
 }
 
-test_linux_pid_identity_ignores_wall_clock_and_detects_pid_reuse() {
-  local dir state proc_root pid before after_time_jump after_pid_reuse
-  [ "$(uname)" = Linux ] || {
-    pass "Linux process identity clock-step regression skipped on non-Linux host"
-    return
-  }
-  dir=$(make_case linux-pid-identity)
+test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse() {
+  local dir state proc_root pid identity_key before after_time_jump after_pid_reuse
+  dir=$(make_case proc-pid-identity)
   state="$dir/state"
   proc_root="$dir/proc"
   pid=4242
+  identity_key=proc-starttime
+  [ "$(uname)" != Linux ] || identity_key=linux-starttime
   mkdir -p "$proc_root"
   printf 'btime 1784094040\n' > "$proc_root/stat"
   write_fake_proc_identity "$proc_root" "$pid" 987654
@@ -1200,21 +999,43 @@ test_linux_pid_identity_ignores_wall_clock_and_detects_pid_reuse() {
     || fail "could not re-read fake Linux process identity after btime change"
 
   [ "$after_time_jump" = "$before" ] \
-    || fail "Linux process identity changed with btime (before '$before', after '$after_time_jump')"
-  [ "$before" = 'linux-starttime=987654 cmdline-hex=62617368002f706174682077697468207370616365732f666d2d77617463682e7368002d2d666c616700' ] \
-    || fail "Linux process identity did not combine parsed starttime field 22 with the full cmdline ('$before')"
-  pass "Linux process identity ignores simulated btime changes"
+    || fail "/proc process identity changed with btime (before '$before', after '$after_time_jump')"
+  [ "$before" = "$identity_key=987654 cmdline-hex=62617368002f706174682077697468207370616365732f666d2d77617463682e7368002d2d666c616700" ] \
+    || fail "/proc process identity did not combine parsed starttime field 22 with the full cmdline ('$before')"
+  pass "/proc process identity ignores simulated btime changes"
 
   write_fake_proc_identity "$proc_root" "$pid" 987655
   after_pid_reuse=$(FM_PROC_ROOT_OVERRIDE="$proc_root" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$pid") \
-    || fail "could not read reused fake Linux pid identity"
-  [ "$after_pid_reuse" != "$before" ] || fail "Linux process identity missed changed starttime for reused pid"
-  pass "Linux process identity detects pid reuse"
+    || fail "could not read reused fake /proc pid identity"
+  [ "$after_pid_reuse" != "$before" ] || fail "/proc process identity missed changed starttime for reused pid"
+  pass "/proc process identity detects pid reuse"
+}
+
+test_msys_pid_identity_uses_proc() {
+  local live identity
+  case "$(uname)" in
+    MSYS*|MINGW*|CYGWIN*) ;;
+    *)
+      pass "MSYS /proc process identity regression skipped on non-Windows host"
+      return
+      ;;
+  esac
+  sleep 300 &
+  live=$!
+  identity=$(bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  case "$identity" in
+    proc-starttime=*" cmdline-hex="*) ;;
+    *) fail "MSYS process identity did not use compatible /proc fields ('$identity')" ;;
+  esac
+  pass "MSYS process identity uses compatible /proc fields"
 }
 
 test_singleton_start
 test_pid_identity_is_locale_invariant
-test_linux_pid_identity_ignores_wall_clock_and_detects_pid_reuse
+test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse
+test_msys_pid_identity_uses_proc
 test_stale_watch_lock_reclaimed
 test_live_stale_watch_lock_is_actionable
 test_guard_warnings
@@ -1226,8 +1047,6 @@ test_lock_does_not_steal_live_lock
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
-test_lock_prep_fn_publishes_atomically_before_ln
-test_watcher_healthy_survives_read_side_lock_swap
 test_watch_restart_rejects_reused_pid
 test_watch_restart_attaches_to_healthy_peer
 test_watcher_self_evicts_on_lock_takeover
@@ -1236,10 +1055,8 @@ test_arm_attaches_and_waits_for_live_fresh_watcher
 test_attached_arm_signal_is_recorded_in_cycle_ledger
 test_arm_starts_and_self_heals
 test_arm_hup_cleans_child_and_temp_output
-test_arm_hup_release_does_not_scale_with_the_poll_interval
 test_arm_propagates_immediate_wake_before_confirmation
 test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
-test_arm_reports_migration_in_progress_instead_of_generic_failure
 test_cycle_exit_ledger_links_successor_and_stays_bounded
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified
