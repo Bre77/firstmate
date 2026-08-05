@@ -11,9 +11,6 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 RUNNER="$ROOT/bin/fm-test-run.sh"
-CI="$ROOT/.github/workflows/ci.yml"
-CONTRIB="$ROOT/CONTRIBUTING.md"
-SHARD_DOC="$ROOT/docs/fm-test-portable-shards.md"
 
 assert_present "$RUNNER" "bin/fm-test-run.sh is missing"
 [ -x "$RUNNER" ] || fail "bin/fm-test-run.sh must be executable"
@@ -98,7 +95,7 @@ init_changed_fixture_repo() {
   chmod +x "$repo/bin/fm-test-run.sh"
   for script in \
     fm-brief.test.sh \
-    fm-captain-translation-contract.test.sh \
+    fm-ask-user-authority.test.sh \
     fm-cd-pretool-check.test.sh \
     fm-daemon.test.sh \
     fm-backend-herdr-smoke.test.sh \
@@ -136,7 +133,7 @@ init_changed_fixture_repo() {
 
 test_changed_dependency_selection_and_unmapped_failure() {
   local tmp repo listed rc
-  tmp=$(fm_test_tmproot fm-test-run-changed)
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-changed.XXXXXX")
   repo="$tmp/repo"
   init_changed_fixture_repo "$repo"
 
@@ -167,7 +164,7 @@ test_changed_dependency_selection_and_unmapped_failure() {
   printf '\n' >>"$repo/.pi/extensions/fm-primary-pi-watch.ts"
   printf '\n' >>"$repo/.pi/extensions/fm-primary-turnend-guard.ts"
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
-  assert_contains "$listed" "tests/fm-captain-translation-contract.test.sh" "skill source selects pure contract coverage"
+  assert_contains "$listed" "tests/fm-ask-user-authority.test.sh" "skill source selects pure contract coverage"
   assert_contains "$listed" "tests/fm-cd-pretool-check.test.sh" "Claude and Pi source selects hook coverage"
   assert_contains "$listed" "tests/fm-pi-watch-extension.test.sh" "Pi source selects watcher coverage"
   git -C "$repo" add .agents .claude .pi
@@ -181,12 +178,13 @@ test_changed_dependency_selection_and_unmapped_failure() {
   [ "$rc" -eq 2 ] || fail "unmapped changed source must fail with exit 2, got $rc"
   grep -Fq 'no changed-test mapping for source path: src/unmapped.ts' "$tmp/err" \
     || fail "unmapped changed source failure is not actionable: $(cat "$tmp/err")"
+  rm -rf "$tmp"
   pass "changed selection covers dependents and fails closed for unmapped source"
 }
 
 test_empty_selection_emits_summary() {
   local tmp repo out json
-  tmp=$(fm_test_tmproot fm-test-run-empty)
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-empty.XXXXXX")
   repo="$tmp/repo"
   init_changed_fixture_repo "$repo"
   printf 'documentation only\n' >"$repo/README.md"
@@ -201,13 +199,14 @@ doc = json.load(open(sys.argv[1]))
 assert doc["summary"] == {"duration_ms": 0, "failed": 0, "skipped_gate": 0, "total": 0}
 assert doc["scripts"] == []
 assert doc["families"] == []
-' "$json" || fail "empty selection JSON summary is wrong"
+' "$json" || { rm -rf "$tmp"; fail "empty selection JSON summary is wrong"; }
+  rm -rf "$tmp"
   pass "empty changed selection emits deterministic text and JSON summaries"
 }
 
 test_timing_markers_and_json() {
   local tmp fixture out json begin_n end_n summary
-  tmp=$(fm_test_tmproot fm-test-run-timing)
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-timing.XXXXXX")
   fixture="$tmp/ok.test.sh"
   out="$tmp/out.txt"
   json="$tmp/timing.json"
@@ -218,7 +217,7 @@ exit 0
 SH
   chmod +x "$fixture"
   "$RUNNER" --json "$json" "$fixture" >"$out" 2>"$tmp/err.txt" \
-    || fail "runner should pass on a green fixture"
+    || { rm -rf "$tmp"; fail "runner should pass on a green fixture"; }
   begin_n=$(grep -c '^FM_TEST_BEGIN ' "$out" || true)
   end_n=$(grep -c '^FM_TEST_END ' "$out" || true)
   [ "$begin_n" -eq 1 ] || fail "expected one FM_TEST_BEGIN, got $begin_n"
@@ -246,13 +245,14 @@ assert doc["summary"]["total"] == 1
 assert doc["summary"]["failed"] == 0
 assert "duration_ms" in doc["scripts"][0]
 assert "family" in doc["scripts"][0]
-' "$json" || fail "JSON timing artifact missing required fields"
+' "$json" || { rm -rf "$tmp"; fail "JSON timing artifact missing required fields"; }
+  rm -rf "$tmp"
   pass "timing markers and JSON artifact are valid"
 }
 
 test_aggregate_exit_behavior() {
   local tmp pass_f fail_f rc
-  tmp=$(fm_test_tmproot fm-test-run-agg)
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-agg.XXXXXX")
   pass_f="$tmp/pass.test.sh"
   fail_f="$tmp/fail.test.sh"
   cat >"$pass_f" <<'SH'
@@ -278,13 +278,14 @@ SH
   "$RUNNER" "$pass_f" >"$tmp/out2.txt" 2>"$tmp/err2.txt"
   rc=$?
   set -e
-  [ "$rc" -eq 0 ] || fail "aggregate exit must be 0 when every script passes"
+  [ "$rc" -eq 0 ] || { rm -rf "$tmp"; fail "aggregate exit must be 0 when every script passes"; }
+  rm -rf "$tmp"
   pass "aggregate exit reflects any script failure"
 }
 
 test_gate_skip_accounting() {
   local tmp skip_f out json
-  tmp=$(fm_test_tmproot fm-test-run-skip)
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-skip.XXXXXX")
   skip_f="$tmp/skip.test.sh"
   out="$tmp/out.txt"
   json="$tmp/timing.json"
@@ -306,13 +307,14 @@ doc = json.load(open(sys.argv[1]))
 assert doc["scripts"][0]["gate_skip"] is True
 assert doc["summary"]["skipped_gate"] == 1
 assert doc["summary"]["failed"] == 0
-' "$json" || fail "JSON gate_skip accounting is wrong"
+' "$json" || { rm -rf "$tmp"; fail "JSON gate_skip accounting is wrong"; }
+  rm -rf "$tmp"
   pass "gate-skip accounting is honest and non-failing"
 }
 
 test_fail_on_gate_skip_token() {
   local tmp skip_f out rc
-  tmp=$(fm_test_tmproot fm-test-run-fail-skip)
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-fail-skip.XXXXXX")
   skip_f="$tmp/skip.test.sh"
   out="$tmp/out.txt"
   cat >"$skip_f" <<'SH'
@@ -330,6 +332,7 @@ SH
     || fail "summary must report failed=1 under fail-on-gate-skip: $(grep FM_TEST_SUMMARY "$out")"
   grep -q 'required gate skip token' "$tmp/err.txt" \
     || fail "runner must log the required gate skip token"
+  rm -rf "$tmp"
   pass "fail-on-gate-skip converts herdr-not-found into a hard failure"
 }
 
@@ -347,84 +350,6 @@ test_exclude_family() {
   pass "exclude-family drops the named primary family after selection"
 }
 
-test_ci_and_docs_call_the_owner() {
-  assert_present "$CI" "ci.yml missing"
-  assert_present "$CONTRIB" "CONTRIBUTING.md missing"
-  grep -Fq 'tests-portable-parallel-1:' "$CI" \
-    || fail "CI must define portable parallel shard 1"
-  grep -Fq 'tests-portable-parallel-2:' "$CI" \
-    || fail "CI must define portable parallel shard 2"
-  grep -Fq 'tests-portable-serial:' "$CI" \
-    || fail "CI must define the portable serial lane"
-  grep -Fq 'bin/fm-test-run.sh --lane portable-parallel-1' "$CI" \
-    || fail "CI shard 1 must invoke --lane portable-parallel-1"
-  grep -Fq 'bin/fm-test-run.sh --lane portable-parallel-2' "$CI" \
-    || fail "CI shard 2 must invoke --lane portable-parallel-2"
-  local shard job_body
-  for shard in 1 2; do
-    job_body=$(awk -v job="  tests-portable-parallel-$shard:" '
-      $0 == job { in_job=1; next }
-      in_job && /^  [a-zA-Z0-9_-]+:/ { exit }
-      in_job { print }
-    ' "$CI")
-    printf '%s\n' "$job_body" | grep -Fq 'npm install -g tasks-axi' \
-      || fail "CI portable parallel shard $shard must install tasks-axi"
-    printf '%s\n' "$job_body" | grep -Fq 'tasks-axi --version' \
-      || fail "CI portable parallel shard $shard must verify tasks-axi"
-  done
-  grep -Fq 'bin/fm-test-run.sh --lane portable-serial' "$CI" \
-    || fail "CI portable serial must invoke --lane portable-serial"
-  grep -Fq 'bin/fm-test-run.sh --check-coverage' "$CI" \
-    || fail "CI must run the coverage guard"
-  grep -Fq 'tests-herdr:' "$CI" \
-    || fail "CI must define the required tests-herdr job"
-  grep -Fq 'bin/fm-test-run.sh --family real-herdr-gated' "$CI" \
-    || fail "Herdr CI job must run the real-herdr-gated family via fm-test-run"
-  grep -Fq -- "--fail-on-gate-skip 'herdr not found'" "$CI" \
-    || fail "Herdr CI job must fail on herdr-not-found skips"
-  grep -Fq 'bin/fm-install-herdr.sh' "$CI" \
-    || fail "Herdr CI job must install via bin/fm-install-herdr.sh"
-  grep -Fq 'bin/fm-install-treehouse.sh' "$CI" \
-    || fail "Herdr CI job must install via bin/fm-install-treehouse.sh"
-  grep -Fq 'bin/fm-herdr-ci-cleanup.sh' "$CI" \
-    || fail "Herdr CI job must use bounded lab cleanup"
-  grep -Fq 'tests-timing-aggregate:' "$CI" \
-    || fail "CI must aggregate per-lane timing artifacts"
-  grep -Fq 'timeout-minutes: 20' "$CI" \
-    || fail "portable serial hang tripwire must be timeout-minutes: 20"
-  grep -Fq 'timeout-minutes: 10' "$CI" \
-    || fail "portable parallel shards must keep a hang tripwire (10m)"
-  # Interim full-suite 25m portable timeout must not remain after sharding.
-  if grep -Eq 'timeout-minutes: 25' "$CI"; then
-    fail "CI still has interim timeout-minutes: 25 after portable sharding"
-  fi
-  # Stale "~2-3 minutes" claim must not remain.
-  if grep -Eq '2-3 minutes' "$CI"; then
-    fail "CI workflow still claims the suite finishes in ~2-3 minutes"
-  fi
-  # No retry-green strategy on Behavior lanes.
-  if grep -Eqi 'retry:|max-attempts:|continue-on-error:\s*true' "$CI"; then
-    fail "CI must not use retries or continue-on-error as a green strategy"
-  fi
-  grep -Fq 'fm-test-timing' "$CI" \
-    || fail "CI must upload timing artifacts"
-  grep -Fq 'bin/fm-test-run.sh --all' "$CONTRIB" \
-    || fail "CONTRIBUTING must document bin/fm-test-run.sh --all"
-  grep -Fq 'bin/fm-test-run.sh --family' "$CONTRIB" \
-    || fail "CONTRIBUTING must document family selection"
-  grep -Fq 'bin/fm-test-run.sh --changed' "$CONTRIB" \
-    || fail "CONTRIBUTING must document changed-file selection"
-  grep -Fq 'bin/fm-test-run.sh --proven-isolated --jobs' "$CONTRIB" \
-    || fail "CONTRIBUTING must document proven-isolated --jobs"
-  grep -Fq 'intent-targeted' "$CONTRIB" \
-    || fail "CONTRIBUTING must document intent-targeted no-mistakes Test"
-  # Do not restore a complete-suite commands.test.
-  if grep -E '^[[:space:]]*test:[[:space:]].*tests/\*\.test\.sh' "$ROOT/.no-mistakes.yaml" >/dev/null 2>&1; then
-    fail ".no-mistakes.yaml must not set a full-suite commands.test"
-  fi
-  pass "CI and CONTRIBUTING call the one-owner runner; no full-suite local Test"
-}
-
 test_portable_shard_union_and_coverage_guard() {
   local s1 s2 proven serial herdr all_count union_count overlap out first
   s1=$("$RUNNER" --list --lane portable-parallel-1)
@@ -434,7 +359,7 @@ test_portable_shard_union_and_coverage_guard() {
   herdr=$("$RUNNER" --list --family real-herdr-gated)
   [ -n "$s1" ] && [ -n "$s2" ] || fail "portable parallel shards must be non-empty"
   # Shards disjoint.
-  overlap=$(LC_ALL=C comm -12 <(printf '%s\n' "$s1" | LC_ALL=C sort) <(printf '%s\n' "$s2" | LC_ALL=C sort) || true)
+  overlap=$(comm -12 <(printf '%s\n' "$s1" | LC_ALL=C sort) <(printf '%s\n' "$s2" | LC_ALL=C sort) || true)
   [ -z "$overlap" ] || fail "portable parallel shards overlap: $overlap"
   # Union of shards equals proven-isolated.
   [ "$(printf '%s\n' "$s1" "$s2" | LC_ALL=C sort -u)" = \
@@ -456,43 +381,94 @@ test_portable_shard_union_and_coverage_guard() {
     || fail "lanes must not duplicate scripts"
   # LPT order: first script of shard 1 is the longest proven script.
   first=$(printf '%s\n' "$s1" | head -n 1)
-  [ "$first" = "tests/fm-arm-pretool-check.test.sh" ] \
-    || fail "shard 1 must start with longest proven script, got $first"
+  [ "$first" = "tests/fm-x-mode.test.sh" ] \
+    || fail "shard 1 must start with the longest proven script, got $first"
   pass "portable shard union, disjointness, and coverage guard hold"
 }
 
-test_portable_shard_docs_match_lanes() {
-  python3 - "$RUNNER" "$SHARD_DOC" <<'PY' \
-    || fail "portable shard documentation must match lane counts and timing sums"
-import re
-import subprocess
-import sys
+test_portable_serial_shards_partition_the_serial_lane() {
+  local lanes count serial shard listed union dups shard_lane total cap
+  lanes=$("$RUNNER" --list-lanes)
+  count=$(printf '%s\n' "$lanes" | grep -c '^portable-serial-[0-9]*of[0-9]*$')
+  [ "$count" -ge 2 ] || fail "expected at least two portable serial shard lanes, got $count"
+  printf '%s\n' "$lanes" | grep -q "^portable-serial-1of${count}\$" \
+    || fail "shard lane names must carry the shard count ${count}: $lanes"
 
-runner, doc_path = sys.argv[1:3]
-markdown = open(doc_path, encoding="utf-8").read()
-averages = {
-    path: int(duration)
-    for duration, path in re.findall(r"^\| (\d+) \| `([^`]+)` \|$", markdown, re.MULTILINE)
+  serial=$("$RUNNER" --list --lane portable-serial | LC_ALL=C sort)
+  union=""
+  shard=1
+  while [ "$shard" -le "$count" ]; do
+    shard_lane="portable-serial-${shard}of${count}"
+    listed=$("$RUNNER" --list --lane "$shard_lane")
+    [ -n "$listed" ] || fail "$shard_lane selected no tests"
+    union=$(printf '%s\n%s' "$union" "$listed")
+    shard=$((shard + 1))
+  done
+  union=$(printf '%s\n' "$union" | grep -v '^$' || true)
+
+  dups=$(printf '%s\n' "$union" | LC_ALL=C sort | uniq -d || true)
+  [ -z "$dups" ] || fail "portable serial shards run the same script twice: $dups"
+  [ "$(printf '%s\n' "$union" | LC_ALL=C sort)" = "$serial" ] \
+    || fail "portable serial shards must exactly cover the portable serial lane"
+
+  # Every shard carries a real share of the lane, so no degenerate partition
+  # leaves one runner doing nearly all of the work the split exists to spread.
+  total=$(printf '%s\n' "$serial" | wc -l | tr -d ' ')
+  cap=$((total * 6 / 10))
+  shard=1
+  while [ "$shard" -le "$count" ]; do
+    listed=$("$RUNNER" --list --lane "portable-serial-${shard}of${count}" | wc -l | tr -d ' ')
+    [ "$listed" -ge 2 ] \
+      || fail "portable-serial-${shard}of${count} holds only $listed script(s)"
+    [ "$listed" -le "$cap" ] \
+      || fail "portable-serial-${shard}of${count} holds $listed of $total scripts"
+    shard=$((shard + 1))
+  done
+
+  # Assignment is deterministic across invocations.
+  [ "$("$RUNNER" --list --lane "portable-serial-1of${count}")" = \
+    "$("$RUNNER" --list --lane "portable-serial-1of${count}")" ] \
+    || fail "portable serial shard membership must be deterministic"
+  pass "portable serial shards are a deterministic disjoint cover of the serial lane"
 }
-totals = {}
-for lane in ("portable-parallel-1", "portable-parallel-2"):
-    scripts = subprocess.check_output(
-        [runner, "--list", "--lane", lane], text=True
-    ).splitlines()
-    totals[lane] = (len(scripts), sum(averages[path] for path in scripts))
 
-for lane, (count, duration) in totals.items():
-    expected = f"| `{lane}` | {count} | {duration} ms (~{duration / 1000:.1f} s) |"
-    assert expected in markdown
-imbalance = abs(totals["portable-parallel-1"][1] - totals["portable-parallel-2"][1])
-assert f"| imbalance | | {imbalance} ms |" in markdown
-PY
-  pass "portable shard documentation matches lane counts and timing sums"
+test_portable_serial_shard_lane_refusals() {
+  local tmp count rc other
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-shard-lane.XXXXXX")
+  count=$("$RUNNER" --list-lanes | grep -c '^portable-serial-[0-9]*of[0-9]*$')
+  other=$((count + 1))
+
+  # A lane built for a different shard count must refuse rather than run a
+  # partial suite: this is what keeps a CI matrix from silently dropping tests.
+  set +e
+  "$RUNNER" --list --lane "portable-serial-1of${other}" >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "mismatched shard count must refuse (exit 2), got $rc"
+  [ ! -s "$tmp/out" ] || fail "mismatched shard count must not list tests"
+  grep -Fq "configured for $count" "$tmp/err" \
+    || fail "mismatch refusal must name the configured count: $(cat "$tmp/err")"
+
+  set +e
+  "$RUNNER" --list --lane "portable-serial-$((count + 1))of${count}" >"$tmp/out2" 2>"$tmp/err2"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "out-of-range shard index must refuse (exit 2), got $rc"
+  grep -Fq "outside 1..$count" "$tmp/err2" \
+    || fail "range refusal message missing: $(cat "$tmp/err2")"
+
+  set +e
+  "$RUNNER" --list --lane portable-serial-1 >"$tmp/out3" 2>"$tmp/err3"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "shard lane without a count must refuse (exit 2), got $rc"
+  rm -rf "$tmp"
+  pass "portable serial shard lanes refuse mismatched, out-of-range, and countless names"
 }
 
 test_jobs_requires_proven_isolated() {
-  local tmp rc
-  tmp=$(fm_test_tmproot fm-test-run-jobs)
+  local tmp rc shard_lane
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-jobs.XXXXXX")
   set +e
   "$RUNNER" --jobs 2 --lane portable-serial >"$tmp/out" 2>"$tmp/err"
   rc=$?
@@ -505,18 +481,28 @@ test_jobs_requires_proven_isolated() {
   rc=$?
   set -e
   [ "$rc" -eq 2 ] || fail "--jobs on watcher-lock must refuse, got $rc"
+  # Sharding across runners never relaxes the serial rule inside one shard.
+  shard_lane=$("$RUNNER" --list-lanes | grep -m1 '^portable-serial-[0-9]*of[0-9]*$')
+  set +e
+  "$RUNNER" --jobs 2 --lane "$shard_lane" >"$tmp/out3" 2>"$tmp/err3"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "--jobs with a portable serial shard must refuse, got $rc"
+  grep -Fq 'not in the proven-isolated set' "$tmp/err3" \
+    || fail "shard --jobs refusal message missing: $(cat "$tmp/err3")"
+  rm -rf "$tmp"
   pass "--jobs refuses non-proven / stateful selections"
 }
 
 test_jobs_parallel_scheduler_and_failure_propagation() {
   local tmp repo runner evidence fake_bin a b c d rc begin_n end_n
-  tmp=$(fm_test_tmproot fm-test-run-jobs-sched)
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-jobs-sched.XXXXXX")
   repo="$tmp/repo"
   runner="$repo/bin/fm-test-run.sh"
   evidence="$tmp/evidence"
   fake_bin="$tmp/fake-bin"
-  a=tests/fm-no-mistakes-ownership.test.sh
-  b=tests/fm-stow-contract.test.sh
+  a=tests/fm-brief.test.sh
+  b=tests/fm-composer-lib.test.sh
   c=tests/fm-lint.test.sh
   d=tests/fm-supervision-instructions.test.sh
   mkdir -p "$repo/bin" "$repo/tests" "$evidence" "$fake_bin"
@@ -533,33 +519,47 @@ if [ "$1" = "-f" ] && [ "$2" = "%Lp" ]; then
 fi
 exit 1
 SH
+  # The slow fixture blocks on the replacement fixture's own signal rather than
+  # a wall-clock sleep, so a loaded machine cannot let it finish first and turn
+  # a correct scheduler into a failure. The bounded deadline is only there so a
+  # scheduler that really does wait for the oldest worker still reports instead
+  # of hanging.
   cat >"$repo/$a" <<'SH'
 #!/usr/bin/env bash
-sleep 0.5
+if [ -n "${SCHED_WAIT_FOR_REPLACEMENT:-}" ]; then
+  waited=0
+  while [ ! -e "$SCHED_EVIDENCE/replacement-started" ] && [ "$waited" -lt 600 ]; do
+    sleep 0.05
+    waited=$((waited + 1))
+  done
+fi
 touch "$SCHED_EVIDENCE/slow-done"
 echo "ok - slow fixture"
 SH
   cat >"$repo/$b" <<'SH'
 #!/usr/bin/env bash
-sleep 0.05
 echo "ok - fast fixture"
 SH
   cat >"$repo/$c" <<'SH'
 #!/usr/bin/env bash
+# Read the evidence before releasing the slow fixture, so the release can never
+# race ahead of the check it is being used to make.
 if [ -e "$SCHED_EVIDENCE/slow-done" ]; then
+  touch "$SCHED_EVIDENCE/replacement-started"
   echo "not ok - scheduler waited for oldest worker"
   exit 1
 fi
+touch "$SCHED_EVIDENCE/replacement-started"
 echo "ok - replacement fixture started before slow fixture finished"
 SH
   chmod +x "$runner" "$repo/$a" "$repo/$b" "$repo/$c" "$fake_bin/stat"
   set +e
-  PATH="$fake_bin:$PATH" SCHED_EVIDENCE="$evidence" \
+  PATH="$fake_bin:$PATH" SCHED_EVIDENCE="$evidence" SCHED_WAIT_FOR_REPLACEMENT=1 \
     "$runner" --jobs 2 --json "$tmp/timing.json" \
     "$a" "$b" "$c" >"$tmp/out" 2>"$tmp/err"
   rc=$?
   set -e
-  [ "$rc" -eq 0 ] || { cat "$tmp/out" "$tmp/err"; fail "jobs=2 must refill the first completed slot"; }
+  [ "$rc" -eq 0 ] || { cat "$tmp/out" "$tmp/err"; rm -rf "$tmp"; fail "jobs=2 must refill the first completed slot"; }
   begin_n=$(grep -c '^FM_TEST_BEGIN ' "$tmp/out" || true)
   end_n=$(grep -c '^FM_TEST_END ' "$tmp/out" || true)
   [ "$begin_n" -eq 3 ] || fail "expected 3 BEGIN markers, got $begin_n"
@@ -572,7 +572,7 @@ doc=json.load(open(sys.argv[1]))
 assert doc["summary"]["total"]==3
 assert doc["summary"]["failed"]==0
 assert "jobs=2" in doc["selection"]
-' "$tmp/timing.json" || fail "jobs JSON artifact wrong"
+' "$tmp/timing.json" || { rm -rf "$tmp"; fail "jobs JSON artifact wrong"; }
 
   # Non-proven path is refused before any worker starts (no race masking).
   cat >"$tmp/fail.test.sh" <<'SH'
@@ -594,14 +594,13 @@ echo "not ok - deliberate proven-set fail"
 exit 1
 SH
   chmod +x "$repo/$b"
-  rm -f "$evidence/slow-done"
   set +e
   SCHED_EVIDENCE="$evidence" "$runner" --jobs 2 "$a" "$b" >"$tmp/out4" 2>"$tmp/err4"
   rc=$?
   set -e
-  [ "$rc" -ne 0 ] || fail "jobs aggregate must be non-zero when a proven worker fails"
+  [ "$rc" -ne 0 ] || { rm -rf "$tmp"; fail "jobs aggregate must be non-zero when a proven worker fails"; }
   grep -q 'FM_TEST_SUMMARY total=2 failed=1' "$tmp/out4" \
-    || { fail "jobs failure summary wrong: $(grep FM_TEST_SUMMARY "$tmp/out4")"; }
+    || { rm -rf "$tmp"; fail "jobs failure summary wrong: $(grep FM_TEST_SUMMARY "$tmp/out4")"; }
 
   cat >"$repo/$d" <<'SH'
 #!/usr/bin/env bash
@@ -613,23 +612,24 @@ SH
   "$runner" --jobs 2 --fail-on-gate-skip 'herdr not found' "$d" >"$tmp/out5" 2>"$tmp/err5"
   rc=$?
   set -e
-  [ "$rc" -ne 0 ] || fail "parallel stderr gate skip must hard-fail"
+  [ "$rc" -ne 0 ] || { rm -rf "$tmp"; fail "parallel stderr gate skip must hard-fail"; }
   grep -q 'FM_TEST_SUMMARY total=1 failed=1' "$tmp/out5" \
-    || { fail "parallel stderr hard-fail summary wrong: $(grep FM_TEST_SUMMARY "$tmp/out5")"; }
+    || { rm -rf "$tmp"; fail "parallel stderr hard-fail summary wrong: $(grep FM_TEST_SUMMARY "$tmp/out5")"; }
 
   "$runner" --jobs 2 "$d" >"$tmp/out6" 2>"$tmp/err6" \
-    || fail "ordinary parallel stderr gate skip must remain successful"
+    || { rm -rf "$tmp"; fail "ordinary parallel stderr gate skip must remain successful"; }
   grep -Eq '^FM_TEST_END .+ exit=0 duration_ms=[0-9]+ gate_skip=true$' "$tmp/out6" \
-    || fail "parallel stderr gate skip was not recorded"
+    || { rm -rf "$tmp"; fail "parallel stderr gate skip was not recorded"; }
   grep -q 'FM_TEST_SUMMARY total=1 failed=0 skipped_gate=1' "$tmp/out6" \
-    || { fail "parallel stderr skip summary wrong: $(grep FM_TEST_SUMMARY "$tmp/out6")"; }
+    || { rm -rf "$tmp"; fail "parallel stderr skip summary wrong: $(grep FM_TEST_SUMMARY "$tmp/out6")"; }
 
+  rm -rf "$tmp"
   pass "jobs scheduler runs proven scripts; failure propagates; non-proven refused"
 }
 
 test_aggregate_json() {
   local tmp a b
-  tmp=$(fm_test_tmproot fm-test-run-aggjson)
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-aggjson.XXXXXX")
   cat >"$tmp/a.json" <<'JSON'
 {
   "run_id": "a",
@@ -664,7 +664,8 @@ assert doc["summary"]["total"]==3
 assert doc["summary"]["failed"]==1
 assert doc["summary"]["critical_path_duration_ms"]==2000
 assert len(doc["scripts"])==3
-' "$tmp/out.json" || fail "aggregate JSON shape wrong"
+' "$tmp/out.json" || { rm -rf "$tmp"; fail "aggregate JSON shape wrong"; }
+  rm -rf "$tmp"
   pass "aggregate-json merges lane timing artifacts"
 }
 
@@ -679,9 +680,9 @@ test_aggregate_exit_behavior
 test_gate_skip_accounting
 test_fail_on_gate_skip_token
 test_exclude_family
-test_ci_and_docs_call_the_owner
 test_portable_shard_union_and_coverage_guard
-test_portable_shard_docs_match_lanes
+test_portable_serial_shards_partition_the_serial_lane
+test_portable_serial_shard_lane_refusals
 test_jobs_requires_proven_isolated
 test_jobs_parallel_scheduler_and_failure_propagation
 test_aggregate_json

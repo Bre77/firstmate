@@ -152,7 +152,7 @@ test_ship_spawn_wraps_launch_with_default_caps() {
   rec=$(make_spawn_case memcap-ship-default 0 "$id")
   read_case_record "$rec"
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off)
   status=$?
   expect_code 0 "$status" "ship spawn with a healthy systemd-run should succeed"
   assert_contains "$out" "spawned $id harness=claude kind=ship" "spawn did not report ship kind"
@@ -194,7 +194,7 @@ test_env_vars_override_default_caps() {
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" GROK_HOME="$HOME_DIR/grok-home" PATH="$FAKEBIN_DIR:$PATH" \
     FM_CREW_MEMORY_HIGH=1G FM_CREW_MEMORY_MAX=2G FM_CREW_MEMORY_SWAP=512M \
-    "$SPAWN" "$id" "$PROJ_DIR" 2>&1)
+    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
   status=$?
   expect_code 0 "$status" "ship spawn with overridden memory env vars should succeed"
 
@@ -210,7 +210,7 @@ test_unavailable_systemd_run_falls_back_unwrapped_with_warning() {
   rec=$(make_spawn_case memcap-fallback 1 "$id")
   read_case_record "$rec"
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off)
   status=$?
   expect_code 0 "$status" "spawn must still succeed when systemd-run --user is unavailable"
   assert_contains "$out" "warning: systemd-run --user is unavailable on this host" \
@@ -241,11 +241,12 @@ test_secondmate_agent_launch_is_not_wrapped() {
   launch=$(cat "$LAUNCH_LOG")
   assert_not_contains "$launch" "systemd-run" \
     "the secondmate AGENT's own launch must not be wrapped in a memory-capped scope"
-  expected_prefix="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME="
+  expected_prefix="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= "
   case "$launch" in
     "$expected_prefix"*) : ;;
-    *) fail "secondmate launch missing its FM_HOME env prefix"$'\n'"--- actual ---"$'\n'"$launch" ;;
+    *) fail "secondmate launch missing its override env prefix"$'\n'"--- actual ---"$'\n'"$launch" ;;
   esac
+  assert_contains "$launch" " FM_HOME=" "secondmate launch missing its FM_HOME env"
   pass "a --secondmate AGENT launch is not wrapped (only the crewmates it spawns are, via this same script)"
 }
 

@@ -6,7 +6,9 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> [--scout | --fork-only] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
+#        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
+#        fm-brief.sh <task-id> <repo-name> --fork-only [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --amend <pr-url> --head <sha>
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
@@ -46,15 +48,25 @@
 #   The flag must be explicit because {TASK} is filled after scaffolding and the
 #   caller-supplied repo string cannot reliably identify this repo. Briefs made
 #   without it carry a loud declaration so an omitted contract cannot be silent.
-# For ship tasks, the definition of done is shaped by the project's delivery mode
-# (data/projects.md via fm-project-mode.sh; see the project-management skill
-# and AGENTS.md task lifecycle):
-#   no-mistakes  implement -> /no-mistakes pipeline -> PR -> captain merge (default)
-#   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> captain merge
+# For ship tasks, --mode is REQUIRED and shapes the definition of done. Firstmate
+# resolves it per task at intake (AGENTS.md section 7); data/projects.md holds the
+# captain's standing posture as context, and this script never reads it:
+#   no-mistakes  implement -> /no-mistakes pipeline -> PR -> configured merge authority
+#   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> configured merge authority
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
-#                captain approves, firstmate merges to local main
+#                the configured merge authority approves, firstmate merges to local main
+# no-mistakes-prod-only is a registry policy, not a task mode; resolve it to one of
+# the three concrete modes at intake before calling this script.
+# The generated ship brief records the chosen mode as a fixed machine-readable
+# "Delivery contract: mode=<mode>" line. bin/fm-spawn.sh reads that line and refuses
+# to launch a ship task whose explicit --mode disagrees, so an adjusted brief and the
+# recorded task metadata cannot drift apart.
+# --fork-only and --amend carry their own delivery contract and take no --mode.
 # Ship briefs begin with a worktree-isolation assertion before the branch or PR checkout step.
-# Scout tasks ignore mode - their deliverable is a report, not a merge.
+# --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
+# report rather than a merge, and a charter is not a delivery contract.
+# There is no --yolo flag here. The worker never owns approval decisions, so yolo is
+# a spawn-time and firstmate-side input only (AGENTS.md section 7).
 # Every scaffold's status protocol distinguishes the configured
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
@@ -98,10 +110,31 @@ esac
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
+
+resolve_directory_input() {
+  local name=$1 path=$2 resolved
+  case "$path" in
+    /*) printf '%s\n' "$path"; return 0 ;;
+  esac
+  resolved=$(CDPATH='' cd -- "$path" 2>/dev/null && pwd -P) || {
+    echo "error: $name directory cannot be resolved: $path" >&2
+    return 1
+  }
+  printf '%s\n' "$resolved"
+}
+
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
-DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
-STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+FM_HOME=$(resolve_directory_input FM_HOME "${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}") || exit 1
+if [ -n "${FM_DATA_OVERRIDE:-}" ]; then
+  DATA=$(resolve_directory_input FM_DATA_OVERRIDE "$FM_DATA_OVERRIDE") || exit 1
+else
+  DATA="$FM_HOME/data"
+fi
+if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
+  STATE=$(resolve_directory_input FM_STATE_OVERRIDE "$FM_STATE_OVERRIDE") || exit 1
+else
+  STATE="$FM_HOME/state"
+fi
 KIND=ship
 FORK_ONLY=false
 AMEND_PR=
@@ -110,6 +143,8 @@ AMEND_SET=0
 HEAD_SET=0
 HERDR_LAB=0
 NO_PROJECTS=0
+MODE=
+MODE_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -120,6 +155,7 @@ for a in "$@"; do
     case "$want_value" in
       amend) AMEND_PR=$a; AMEND_SET=1 ;;
       head) AMEND_HEAD=$a; HEAD_SET=1 ;;
+      mode) MODE=$a; MODE_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -135,6 +171,12 @@ for a in "$@"; do
     --head=*) AMEND_HEAD=${a#--head=}; HEAD_SET=1 ;;
     --herdr-lab) HERDR_LAB=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
+    --mode) want_value=mode ;;
+    --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
+    # yolo never reaches the worker: it is firstmate's approval authority, not a
+    # brief input. Refuse it loudly so it is never silently dropped here and then
+    # believed to have been recorded.
+    --yolo|--yolo=*) echo "error: --yolo is not a brief input; pass it to bin/fm-spawn.sh, which records the task's approval posture" >&2; exit 1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -147,6 +189,26 @@ if [ "$AMEND_SET" -eq 1 ]; then
   [ "$HEAD_SET" -eq 1 ] || { echo "error: --amend requires --head <sha>" >&2; exit 1; }
 elif [ "$HEAD_SET" -eq 1 ]; then
   echo "error: --head requires --amend" >&2
+  exit 1
+fi
+
+# Ship delivery mode is an explicit per-task decision (AGENTS.md section 7). A
+# missing or invalid value stops the scaffold rather than silently defaulting.
+# --fork-only and --amend carry their own delivery contract and take no --mode.
+if [ "$KIND" = ship ] && ! "$FORK_ONLY" && [ "$AMEND_SET" -eq 0 ]; then
+  [ "$MODE_SET" -eq 1 ] || {
+    echo "error: ship briefs require --mode <no-mistakes|direct-PR|local-only>; resolve it at intake from the captain's instruction and the project's registered posture in data/projects.md" >&2
+    exit 1
+  }
+  case "$MODE" in
+    no-mistakes|direct-PR|local-only) ;;
+    no-mistakes-prod-only)
+      echo "error: no-mistakes-prod-only is a registry policy, not a task mode; classify this task's surface and resolve it to no-mistakes or direct-PR at intake" >&2
+      exit 1 ;;
+    *) echo "error: --mode must be one of no-mistakes, direct-PR, local-only (got '$MODE')" >&2; exit 1 ;;
+  esac
+elif [ "$MODE_SET" -eq 1 ]; then
+  echo "error: --mode applies only to ship briefs; a scout delivers a report, a secondmate charter is not a delivery contract, and --fork-only/--amend carry their own contract" >&2
   exit 1
 fi
 ID=${POS[0]}
@@ -335,13 +397,13 @@ HERDR_SECTION=$(printf '%s\n' \
 'Never bypass the helper, even for a read-only lifecycle probe or cleanup after failure.' \
 'The captain fleet uses the running `default` session.')
 else
-HERDR_SECTION=$(cat <<'EOF'
+IFS= read -r -d '' HERDR_SECTION <<'EOF' || true
 # Herdr lifecycle declaration - NOT ENABLED
 **HARD SAFETY GATE:** this scaffold cannot inspect the task text that replaces `{TASK}` later.
 If the task will start, stop, delete, restart, profile, or otherwise drive Herdr lifecycle behavior, stop and regenerate the brief with `--herdr-lab` before dispatch.
 Do not add Herdr lifecycle commands to this unguarded brief by hand.
 EOF
-)
+HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
 if [ "$KIND" = scout ]; then
@@ -396,22 +458,19 @@ echo "scaffolded: $BRIEF (scout; replace {TASK})"
 exit 0
 fi
 
-# Ship task: shape Setup / Rule 1 / Definition of done by the project's delivery mode.
-# yolo does not affect the brief because the worker never owns approval decisions;
-# firstmate applies the authority contract in AGENTS.md section 7, so discard it.
-# --fork-only is a per-task override of the registered upstream mode, so it skips
-# the registry lookup entirely (see docs/fork-only-delivery.md).
+# Ship task: shape Setup / Rule 1 / Definition of done by this task's explicit
+# delivery mode, validated above. The generated DOD opens with the fixed
+# "Delivery contract: mode=<mode>" line that bin/fm-spawn.sh checks against its own
+# explicit --mode before launching.
+# --fork-only selects the fork-only delivery contract instead of an explicit
+# --mode; it takes no registry lookup (see docs/fork-only-delivery.md).
 if "$FORK_ONLY"; then
   MODE=fork-only
-else
-  read -r MODE _ <<EOF
-$("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
-EOF
 fi
 
-# The branch-creation step (Setup step 1); fork-only branches off the fork's main
-# instead of the detached-HEAD default so its base is the fork, never upstream.
-# SETUP2 (any extra setup lines) is appended after this in the brief heredoc.
+# The branch-creation step (Setup step 1); the fork-only case below overrides it to
+# branch off the fork's main instead of the detached-HEAD default so its base is the
+# fork, never upstream. SETUP2 (any extra setup lines) is appended after in the brief.
 BRANCH_STEP='1. First action: create your branch: `git checkout -b fm/'"$ID"'`'
 
 case "$MODE" in
@@ -419,7 +478,7 @@ case "$MODE" in
     BRANCH_STEP='1. First action: branch off the fork'"'"'s main: `git fetch fork --prune && git checkout -B fm/'"$ID"' fork/main`'
     SETUP2=""
     RULE1='1. Never push to the default branch. Push only your `fm/'"$ID"'` branch, and only to the fork remote. Never merge a PR.'
-    DOD=$(cat <<EOF
+    IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 This is a **fork-only** change: it lives only on the fork and is never upstreamed.
 Do NOT run /no-mistakes - that path validates and opens a PR against the upstream repo, which is wrong here.
@@ -431,45 +490,46 @@ The fork PR then runs its own checks (lint, portable behavior-test suites, stock
 Append \`done: PR {url}\` with the URL it prints and stop.
 The captain reviews and firstmate folds the fork PR; do not merge it yourself.
 EOF
-)
     ;;
   direct-PR)
     SETUP2=""
     RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
-    DOD=$(cat <<EOF
+    IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
-This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
+Delivery contract: mode=direct-PR
+This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
-)
     ;;
   local-only)
     SETUP2=""
     RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
-    DOD=$(cat <<EOF
+    IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
-This project ships **local-only**: no remote, no PR, no pipeline.
+Delivery contract: mode=local-only
+This task ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
 When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
-)
     ;;
-  *)  # no-mistakes (default)
+  *)  # no-mistakes
     SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
     RULE1='1. Never push to the default branch. Never merge a PR.'
-    DOD=$(cat <<EOF
+    IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
+Delivery contract: mode=no-mistakes
 The task is complete only when committed on your branch.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
+When starting no-mistakes, make \`--intent\` preserve all relevant content from this brief's \`# Task\` section plus every later accepted Firstmate requirement, clarification, constraint, exclusion, and supersession, carrying only each requirement's current accepted form; retain direct requirements instead of substituting a diff summary, and exclude generic operational, status, delivery, and other scaffold boilerplate unless it is task-specific.
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
 
 Two firstmate-specific rules layer on top of that guidance:
@@ -480,15 +540,19 @@ Two firstmate-specific rules layer on top of that guidance:
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
-)
     ;;
 esac
 
+# read -r -d '' preserves the heredoc's trailing newline that the removed
+# $(...) command substitution used to strip. Drop that one newline so generated
+# briefs stay byte-identical to the historical Bash 5 output.
+DOD=${DOD%$'\n'}
+
 # PR-producing modes (no-mistakes, direct-PR, fork-only) carry the PR-body
-# contract; local-only has no PR. Same $(cat <<EOF) apostrophe hazard as
-# the DOD blocks above.
+# contract; local-only has no PR. Built with read -r -d '' like the DOD blocks
+# above so a heredoc is never wrapped in a Bash-3.2-unsafe command substitution.
 if [ "$MODE" != local-only ]; then
-PRBODY=$(cat <<EOF
+IFS= read -r -d '' PRBODY <<EOF || true
 # PR body
 When you write or edit the PR body - the \`--body-file\` content for fork-only, or via \`gh-axi pr edit\` once a no-mistakes/direct-PR PR exists - calibrate to the TARGET repo you are shipping into, never to firstmate's own past PRs: the target repo's own merged-PR history is the norm to match, and our prior PRs are never the gold standard.
 1. Skim a handful of the target repo's actual merged PRs before writing, and match their length, structure, and tone.
@@ -502,7 +566,7 @@ Internal planning or brainstorm docs, such as a \`docs/plans/*\` WIP file, never
 
 Last-resort default: only when the target repo has no PR template AND no discoverable merged-PR norm to match, fall back to a scannable tree for the opening \`## Intent\` (or \`## What\`) section instead of a prose wall - top-level bullets for the issue(s) addressed, sub-bullets for the fix approach and implications (behavior changes, operational notes, deploy requirements), typically 3-8 top-level bullets nested 2-3 levels max, shape flexing with the change type (bug fix: issue -> root cause -> fix -> implication; feature: goal -> approach -> limits; ops: what -> why -> blast radius); collapse any long-form narrative or the original task prompt only at the BOTTOM of the body inside \`<details><summary>Full narrative / original brief</summary>...</details>\`, never at the top.
 EOF
-)
+PRBODY=${PRBODY%$'\n'}
 DOD="$PRBODY
 
 $DOD"
