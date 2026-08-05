@@ -128,6 +128,16 @@ SH
   fm_fake_exit0 "$fakebin" treehouse gh-axi gh
   fm_fake_exit0 "$fakebin" kimi
   ln -s "$JQ_BIN" "$fakebin/jq"
+  # This suite asserts the exact unwrapped launch text (ending in ' --auto'),
+  # not the per-crew memory cap's wrapping - an ambient real systemd-run on the
+  # test host would wrap it and break that assertion. Stub systemd-run
+  # unavailable so the launch stays unwrapped; tests/fm-crew-memory-cap.test.sh
+  # owns the wrap's own coverage.
+  cat > "$fakebin/systemd-run" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/systemd-run"
   printf '%s\n' "$fakebin"
 }
 

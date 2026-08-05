@@ -181,6 +181,35 @@ hash_pane() {
   if command -v md5 >/dev/null 2>&1; then md5 -q; else md5sum | cut -d' ' -f1; fi
 }
 
+# Generic rendered busy footer, used only to corroborate a backend "idle" verdict
+# below: herdr can report idle during a long foreground tool call while the pane
+# still shows "esc to interrupt" (docs/herdr-backend.md).
+BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'}
+
+# stale_signal: the value the stale-dedup logic hashes for a window given its
+# ALREADY-RESOLVED backend busy state <bs> and <tail40> capture. On a backend
+# with a native settled agent state (herdr reports idle for idle/done/blocked),
+# the signal is that semantic state, NOT the pane content - so a settled pane
+# that merely REPAINTS its volatile harness UI keeps ONE signal and is surfaced
+# once, instead of minting a fresh stale hash every few minutes. An idle verdict
+# is treated as settled only when the last-6-nonblank-line busy footer does not
+# corroborate a busy banner, because herdr can report idle during a long
+# foreground tool call while the pane still renders one. For tmux (busy state
+# always unknown), busy/unknown herdr panes, and idle herdr panes that still look
+# busy, the signal is the pane-content hash exactly as before.
+stale_signal() {  # <bs> <tail40>
+  case "$1" in
+    idle)
+      if printf '%s' "$2" | grep -v '^[[:space:]]*$' | tail -6 | grep -qiE "$BUSY_REGEX"; then
+        printf '%s' "$2" | hash_pane
+      else
+        printf 'agentstate:idle'
+      fi
+      ;;
+    *) printf '%s' "$2" | hash_pane ;;
+  esac
+}
+
 # window_is_busy: 0 (busy) iff the task's harness is PROVABLY working, through
 # the semantic busy-state contract (bin/fm-busy-lib.sh). Only an exact busy
 # verdict returns 0: idle, unknown, and dead all return 1, so a converted
@@ -944,8 +973,14 @@ EOF
     if [ "$kind" = secondmate ] && ! status_is_paused "$last"; then
       continue
     fi
-    tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
-    h=$(printf '%s' "$tail40" | hash_pane)
+    backend=$(window_backend "$w")
+    tail40=$(fm_backend_capture "$backend" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
+    # Herdr stale-dedup: resolve the backend's semantic busy state once and derive
+    # the stale-dedup signal from it (stale_signal above), so a settled herdr pane
+    # that merely repaints volatile UI keeps ONE signal instead of churning a fresh
+    # content hash. tmux (busy state unknown) keeps the pane-content hash.
+    bs=$(fm_backend_busy_state "$backend" "$w" 2>/dev/null)
+    h=$(stale_signal "$bs" "$tail40")
     key=$(printf '%s' "$w" | tr ':/.' '___')
     hf="$STATE/.hash-$key"
     cf="$STATE/.count-$key"
@@ -1081,7 +1116,11 @@ EOF
       if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
         wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf"
       else
-        rm -f "$ssf" "$ewf"
+        # Pane signal changed: the crew is active again, so also reset the
+        # surfaced-stale suppressor ($sf), not just the escalation timer, so a
+        # later genuine stall surfaces fresh instead of being suppressed by a
+        # stale marker from a superseded signal.
+        rm -f "$sf" "$ssf" "$ewf"
       fi
       task=$(window_to_task "$w" "$STATE")
       if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then
