@@ -69,6 +69,46 @@ test_later_unrelated_terminal_line_does_not_close_it() {
   pass "a later unrelated terminal line never clears an open decision"
 }
 
+test_after_colon_key_form_round_trip() {
+  local dir state out
+  dir=$(make_case after-colon-open-close)
+  state="$dir/state"
+  out="$dir/drain.out"
+  # Legacy scaffold text taught the key token just after the colon; the fold
+  # must still parse it so old logs stay correct even though new briefs teach
+  # the canonical before-colon form.
+  printf 'needs-decision: [key=api-shape] pick REST or RPC\n' > "$state/task9.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on an after-colon keyed decision"
+  grep -F 'task9' "$out" | grep -F '[key=api-shape]' >/dev/null \
+    || fail "an after-colon [key=...] needs-decision was not recognized as open"
+
+  printf 'resolved: [key=api-shape] went with REST\n' >> "$state/task9.status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed after an after-colon resolution"
+  if grep -F 'OPEN DECISIONS' "$out" >/dev/null; then
+    fail "an after-colon resolved [key=X] did not close the matching after-colon-opened decision: $(cat "$out")"
+  fi
+  pass "the fold accepts the after-colon [key=...] form for both opening and closing a decision"
+}
+
+test_mixed_key_position_round_trip() {
+  local dir state out
+  dir=$(make_case mixed-position-open-close)
+  state="$dir/state"
+  out="$dir/drain.out"
+  # The exact bug scenario: a crew opened under the old after-colon scaffold
+  # instruction, then closed under the canonical before-colon form (or vice
+  # versa). Both positions name the same key, so the resolution must close it.
+  printf 'needs-decision: [key=api-shape] pick REST or RPC\n' > "$state/task10.status"
+  printf 'resolved [key=api-shape]: went with REST\n' >> "$state/task10.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on a mixed key-position round trip"
+  if grep -F 'OPEN DECISIONS' "$out" >/dev/null; then
+    fail "a before-colon resolved did not close an after-colon-opened decision sharing the same key: $(cat "$out")"
+  fi
+  pass "opening and closing a decision with different key positions but the same key round-trips closed"
+}
+
 test_no_open_decisions_prints_nothing() {
   local dir state out
   dir=$(make_case none-open)
@@ -147,6 +187,8 @@ test_status_symlink_is_not_followed() {
 
 test_buried_decision_still_surfaces
 test_explicit_resolution_closes_it
+test_after_colon_key_form_round_trip
+test_mixed_key_position_round_trip
 test_later_unrelated_terminal_line_does_not_close_it
 test_no_open_decisions_prints_nothing
 test_open_decision_surfaces_even_with_an_unrelated_queued_wake
