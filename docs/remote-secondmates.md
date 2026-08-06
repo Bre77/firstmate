@@ -25,6 +25,10 @@ mkdir -p ~/.local/bin
 ln -s /absolute/path/to/firstmate/bin/fm-remote-entrypoint.sh ~/.local/bin/fm-remote-entrypoint.sh
 ```
 
+The symlink alone is not sufficient on a stock Linux OpenSSH account: sshd runs a plain remote command as a non-interactive, non-login shell, which does not read `~/.bashrc` or `~/.profile`, so `~/.local/bin` stays off `PATH` and the entrypoint resolves as "command not found" even though the symlink exists.
+Confirm the account's actual non-interactive SSH `PATH` with `ssh <alias> 'echo $PATH'` before relying on the symlink.
+When `~/.local/bin` is missing from that output, the narrowest fix is a per-key forced command in `authorized_keys` that prepends it and re-execs the original request, for example `command="/home/USER/.local/bin/prepend-local-bin.sh",no-agent-forwarding,no-pty ssh-ed25519 AAAA...` with that script running `export PATH="$HOME/.local/bin:$PATH"; exec bash -c "$SSH_ORIGINAL_COMMAND"`; this stays scoped to the one dedicated key and needs no `sshd_config` change or `PermitUserEnvironment`.
+
 The entrypoint accepts encoded argv for genuine executable `bin/fm-*.sh` files only.
 It never accepts a shell command string.
 The readiness-owning doctor runs over this plain SSH bootstrap so read-only mode can report worker gaps and `--fix` can install or repair the worker.
