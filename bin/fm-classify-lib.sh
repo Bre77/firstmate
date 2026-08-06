@@ -156,11 +156,15 @@ status_is_paused_or_captain_held() {  # <status-line>
 # terminal line never clears an open captain decision.
 #
 # Decision key grammar (backward-compatible with the existing "<verb>: <note>"
-# format): an OPTIONAL "[key=<slug>]" token sits between the verb and the colon,
+# format): the canonical "[key=<slug>]" token sits between the verb and the colon,
 #   needs-decision [key=api-shape]: <summary>
 #   resolved       [key=api-shape]: <how it was decided>
-# A line with no token uses the key "default", preserving the historical
-# one-open-decision-per-task behavior (a bare "resolved:" closes "default").
+# A tolerated legacy variant places the same token just after the colon instead,
+#   needs-decision: [key=api-shape] <summary>
+# because earlier scaffolds taught that position; a before-colon token always
+# wins when a line somehow carries both. A line with no token in either position
+# uses the key "default", preserving the historical one-open-decision-per-task
+# behavior (a bare "resolved:" closes "default").
 # The three parsers are pure reads of a single line; the verb parser strips any
 # key token before the colon so the leading word is recovered cleanly.
 status_line_verb() {  # <status-line> -> leading verb word
@@ -177,18 +181,34 @@ status_line_note() {  # <status-line> -> text after the first colon, trimmed
   esac
 }
 _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
-  local prefix=${1%%:*} k
+  local line=$1 prefix=${1%%:*} note k
   case "$prefix" in
     *\[key=*\]*)
       k=${prefix#*\[key=}
       k=${k%%\]*}
       case "$k" in
         ''|*[!A-Za-z0-9._-]*) return 1 ;;
-        *) printf '%s' "$k" ;;
+        *) printf '%s' "$k"; return 0 ;;
       esac
       ;;
-    *) printf 'default' ;;
   esac
+  case "$line" in
+    *:*)
+      note=${line#*:}
+      note=${note#"${note%%[![:space:]]*}"}
+      case "$note" in
+        \[key=*\]*)
+          k=${note#\[key=}
+          k=${k%%\]*}
+          case "$k" in
+            ''|*[!A-Za-z0-9._-]*) return 1 ;;
+            *) printf '%s' "$k"; return 0 ;;
+          esac
+          ;;
+      esac
+      ;;
+  esac
+  printf 'default'
 }
 # Drop the record for <key> from a newline-terminated "<key>\t<verb>\t<note>" set.
 # Portable (no associative arrays) so the fold runs on bash 3.2 as well as 4+.

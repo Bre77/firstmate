@@ -952,7 +952,7 @@ test_scheduled_wait_and_decision_key_wording() {
   assert_grep '`paused: canary deploy verification until 14:30 UTC`' "$brief" \
     "ship brief dropped the scheduled-wait pause example"
   # shellcheck disable=SC2016 # Literal backticks are deliberate: pinning the example format verbatim.
-  assert_grep '`needs-decision: [key=<slug>] {summary of options}`' "$brief" \
+  assert_grep '`needs-decision [key=<slug>]: {summary of options}`' "$brief" \
     "ship brief did not show the decision-key position on needs-decision"
   # shellcheck disable=SC2016 # Literal backticks are deliberate: pinning the example format verbatim.
   assert_grep '`resolved [key=<slug>]: {how it was decided or unblocked}`' "$brief" \
@@ -967,7 +967,7 @@ test_scheduled_wait_and_decision_key_wording() {
   assert_grep '`paused: canary deploy verification until 14:30 UTC`' "$brief" \
     "scout brief dropped the scheduled-wait pause example"
   # shellcheck disable=SC2016 # Literal backticks are deliberate: pinning the example format verbatim.
-  assert_grep '`needs-decision: [key=<slug>] {summary of options}`' "$brief" \
+  assert_grep '`needs-decision [key=<slug>]: {summary of options}`' "$brief" \
     "scout brief did not show the decision-key position on needs-decision"
   # shellcheck disable=SC2016 # Literal backticks are deliberate: pinning the example format verbatim.
   assert_grep '`resolved [key=<slug>]: {how it was decided or unblocked}`' "$brief" \
@@ -980,10 +980,38 @@ test_scheduled_wait_and_decision_key_wording() {
   assert_grep "For a KNOWN timed wait (a deploy verification window, a rate-limit reset, an upstream release)," "$brief" \
     "secondmate charter did not instruct a concrete scheduled-wait pause line"
   # shellcheck disable=SC2016 # Literal backticks are deliberate: pinning the example format verbatim.
-  assert_grep 'The key sits between the verb and the colon on both sides: `needs-decision: [key=<slug>] <summary>` opens it, `resolved [key=<slug>]: <how>` closes it.' "$brief" \
+  assert_grep 'The key sits between the verb and the colon on both sides: `needs-decision [key=<slug>]: <summary>` opens it, `resolved [key=<slug>]: <how>` closes it.' "$brief" \
     "secondmate charter did not show the decision-key position for both verbs"
 
   pass "fm-brief.sh: scheduled-wait pause instructions and decision-key positions are pinned"
+}
+
+# The scaffold text must not just READ as before-colon; a status line built from
+# it must actually FOLD under the crew's chosen key rather than "default" per
+# bin/fm-classify-lib.sh's _fm_decision_key, which is the parser every crew's
+# needs-decision/resolved pair is ultimately checked against.
+test_ship_brief_decision_instruction_matches_the_parseable_form() {
+  local home brief line
+  home="$TMP_ROOT/decision-key-parseable-home"
+  mkdir -p "$home/data"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-parseable-ship firstmate --mode no-mistakes >/dev/null 2>&1 \
+    || fail "fm-brief.sh ship scaffold exited non-zero"
+  brief="$home/data/brief-parseable-ship/brief.md"
+
+  # shellcheck source=bin/fm-classify-lib.sh
+  . "$ROOT/bin/fm-classify-lib.sh"
+
+  line=$(grep -F 'needs-decision [key=<slug>]:' "$brief" | head -n1) \
+    && [ -n "$line" ] || fail "ship brief has no before-colon needs-decision instruction to test"
+  line=${line//<slug>/api-shape}
+  # shellcheck disable=SC2016 # Literal backticks are deliberate: matching the brief's own markdown fencing.
+  line=$(printf '%s' "$line" | sed -n 's/.*`\(needs-decision [^`]*\)`.*/\1/p')
+  [ -n "$line" ] || fail "could not extract the literal needs-decision example from the ship brief"
+  [ "$(_fm_decision_key "$line")" = api-shape ] \
+    || fail "the ship brief's own needs-decision example does not fold under its stated key: $line"
+
+  pass "fm-brief.sh: the ship brief's needs-decision instruction parses under the real decision-key fold"
 }
 
 test_script_parses
@@ -1014,3 +1042,4 @@ test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
 test_scheduled_wait_and_decision_key_wording
+test_ship_brief_decision_instruction_matches_the_parseable_form
