@@ -1005,6 +1005,7 @@ test_ship_brief_decision_instruction_matches_the_parseable_form() {
   line=$(grep -F 'needs-decision [key=<slug>]:' "$brief" | head -n1) \
     && [ -n "$line" ] || fail "ship brief has no before-colon needs-decision instruction to test"
   line=${line//<slug>/api-shape}
+  # shellcheck disable=SC2016 # Literal backticks are deliberate: matching the brief's own markdown fencing.
   line=$(printf '%s' "$line" | sed -n 's/.*`\(needs-decision [^`]*\)`.*/\1/p')
   [ -n "$line" ] || fail "could not extract the literal needs-decision example from the ship brief"
   [ "$(_fm_decision_key "$line")" = api-shape ] \
