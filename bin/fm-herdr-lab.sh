@@ -49,9 +49,13 @@ fm_herdr_lab_tripwire_path() { # <session>
 }
 
 fm_herdr_lab_raw() { # <session> <herdr arguments...>
+  # The four HERDR_* identity vars are scrubbed from the invoked herdr process
+  # because herdr 0.8.0 refuses a call whose ambient parent pane identity
+  # belongs to a different session than the targeted lab session.
   local name=$1
   shift
-  HERDR_SESSION="$name" herdr "$@" --session "$name"
+  env -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID -u HERDR_ENV \
+    HERDR_SESSION="$name" herdr "$@" --session "$name"
 }
 
 fm_herdr_lab_session_list() { # <session>
