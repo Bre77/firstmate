@@ -1014,6 +1014,54 @@ test_ship_brief_decision_instruction_matches_the_parseable_form() {
   pass "fm-brief.sh: the ship brief's needs-decision instruction parses under the real decision-key fold"
 }
 
+# The secondmate charter's "resolved" instruction for an escalated decision
+# used to describe the key as "(keyed with `[key=<slug>]` if you opened it
+# with one)" without showing where in the line it goes, unlike the charter's
+# own working/resolved keyed-phase example two lines above it. A secondmate
+# following that wording literally could append the key after the note
+# instead of between the verb and the colon, which _fm_decision_key does not
+# parse - the decision would then never fold closed. This test builds the
+# exact needs-decision/resolved pair the charter's own text shows and asserts
+# the round trip actually closes under the real fold, not just that the words
+# "key" and "colon" appear somewhere in the brief.
+test_secondmate_charter_decision_resolve_round_trips() {
+  local home brief open_line resolve_line status
+  home="$TMP_ROOT/decision-key-secondmate-parseable-home"
+  mkdir -p "$home/data"
+
+  FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-parseable-sm --secondmate --no-projects >/dev/null 2>&1 \
+    || fail "fm-brief.sh secondmate scaffold exited non-zero"
+  brief="$home/data/brief-parseable-sm/brief.md"
+
+  # shellcheck source=bin/fm-classify-lib.sh
+  . "$ROOT/bin/fm-classify-lib.sh"
+
+  # shellcheck disable=SC2016 # Literal backticks are deliberate: matching the brief's own markdown fencing.
+  open_line=$(grep -F 'needs-decision [key=<slug>]:' "$brief" | head -n1) \
+    && [ -n "$open_line" ] || fail "secondmate charter has no before-colon needs-decision instruction to test"
+  # shellcheck disable=SC2016 # Literal backticks are deliberate: matching the brief's own markdown fencing.
+  open_line=$(printf '%s' "$open_line" | sed -n 's/.*`\(needs-decision [^`]*\)`.*/\1/p')
+  [ -n "$open_line" ] || fail "could not extract the literal needs-decision example from the secondmate charter"
+
+  # shellcheck disable=SC2016 # Literal backticks are deliberate: matching the brief's own markdown fencing.
+  resolve_line=$(grep -F 'resolved [key=<slug>]: {how it was decided or unblocked}' "$brief" | head -n1) \
+    && [ -n "$resolve_line" ] || fail "secondmate charter dropped the positioned resolved-escalated-decision example"
+  # shellcheck disable=SC2016 # Literal backticks are deliberate: matching the brief's own markdown fencing.
+  resolve_line=$(printf '%s' "$resolve_line" | sed -n 's/.*`\(resolved [^`]*\)`.*/\1/p')
+  [ -n "$resolve_line" ] || fail "could not extract the literal resolved example from the secondmate charter"
+
+  open_line=${open_line//<slug>/api-shape}
+  resolve_line=${resolve_line//<slug>/api-shape}
+
+  status="$home/data/brief-parseable-sm/round-trip.status"
+  printf '%s\n%s\n' "$open_line" "$resolve_line" > "$status"
+  [ -z "$(status_open_decisions "$status")" ] \
+    || fail "the secondmate charter's own needs-decision/resolved pair does not fold closed: $(cat "$status")"
+
+  pass "fm-brief.sh: the secondmate charter's decision resolve instruction round-trips closed under the real fold"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -1043,3 +1091,4 @@ test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
 test_scheduled_wait_and_decision_key_wording
 test_ship_brief_decision_instruction_matches_the_parseable_form
+test_secondmate_charter_decision_resolve_round_trips

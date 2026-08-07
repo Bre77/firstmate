@@ -303,7 +303,7 @@ Never append \`working:\` merely to acknowledge receipt or announce that a marke
 When a routed-work phase has a supervisor-actionable material change worth reporting under the rule above, give that reported phase a stable key.
 If its first reportable event is \`working [key=<work-slug>]: {material phase}\`, use the same key on its later \`$PAUSED_VERB\`, \`done\`, \`failed\`, \`needs-decision\`, or \`blocked\` event so the earlier working phase is superseded.
 When a keyed phase ends without another reportable state, append \`resolved [key=<work-slug>]: {why it is no longer active}\`.
-When a decision you escalated is answered or a blocker clears and your domain resumes, append \`resolved: {how it was decided or unblocked}\` (keyed with \`[key=<slug>]\` if you opened it with one) so it is durably closed instead of resurfacing behind later unrelated events.
+When a decision you escalated is answered or a blocker clears and your domain resumes, append \`resolved [key=<slug>]: {how it was decided or unblocked}\` (add the same \`[key=<slug>]\` only if you opened it with one) so it is durably closed instead of resurfacing behind later unrelated events.
 The key sits between the verb and the colon on both sides: \`needs-decision [key=<slug>]: <summary>\` opens it, \`resolved [key=<slug>]: <how>\` closes it.
 Routine internal supervision, heartbeats, retries, and crewmate churn stay inside your own home and must not touch that status file.
 
