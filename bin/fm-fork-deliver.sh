@@ -4,15 +4,16 @@
 # fork's default branch. This is the first-class, codified version of what
 # firstmate did by hand for the ClickStack webhook receiver.
 #
-# Why this exists: this clone's no-mistakes gate pushes branches to the fork but
-# opens PRs INTO the upstream (kunchenguid) repo, and the PR base is fixed by the
-# shared bare-repo's origin remote with no per-run override. That routing is
-# correct for UPSTREAM-intended work. But a fork-only feature (e.g. the webhook
-# receiver) must validate and land on the fork's own main WITHOUT going through
-# the upstream "PR must be raised via no-mistakes" path and WITHOUT misrouting an
-# upstream-intended run. This helper does exactly that, decoupled from the
-# no-mistakes bare repo, so it can never misroute to upstream.
-# See docs/fork-only-delivery.md for when to use fork-only vs upstream delivery.
+# Why this exists: the no-mistakes gate's PR base is fixed at `init` time from
+# the checkout's own origin remote, with no per-run override, so a fork-only
+# feature (e.g. the webhook receiver) that must land on the fork's own main
+# cannot simply "run no-mistakes against the fork" without either going through
+# the upstream "PR must be raised via no-mistakes" path or misrouting an
+# upstream-intended run. This helper validates and delivers straight to the
+# fork, decoupled from the no-mistakes bare repo entirely.
+# See docs/fork-only-delivery.md for when to use fork-only vs upstream delivery,
+# and for the separate procedure a clone whose own origin is the fork needs to
+# reach upstream at all.
 #
 # This script runs a LOCAL gate before pushing, mirroring .github/workflows/ci.yml
 # (the lint + behavior tests jobs): shellcheck the shell scripts, then run each
