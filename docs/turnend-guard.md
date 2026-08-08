@@ -68,6 +68,7 @@ Whenever both coordination locks are needed, positive auto-arm recovery and the 
 After that alarm, the Stop auto-arm suppresses further exit-2 continuations until positive watcher recovery, so the final fail-open remains reachable.
 The alarm cannot repeat during that failure episode, and a later unhealthy stop blocks again.
 A positively verified healthy watcher clears the failure notice, alarm, and block budget for a future independent episode.
+A successful away-mode return (`bin/fm-afk-return.sh`) clears the same three markers as soon as the daemon teardown itself succeeds, because returning from away mode is also a fresh independent episode: a failure latch recorded before or while away mode owned the watcher must not survive to permanently refuse the one-time attended fail-open after the captain is back, since the only other way to clear it - a positively verified healthy watcher - is exactly what the deadlocked auto-arm can no longer establish on its own.
 A Claude failure notice describes the automatic mechanism as broken and does not direct a routine manual background arm.
 
 OpenCode, Pi, and pi-signed expose passive callbacks for this purpose.
@@ -109,5 +110,6 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 `tests/fm-guard-stale-banner.test.sh` covers the pull-guard predicate, including the persistent-model fresh-leftover-beacon negative control, the auto-arm model's healthy fresh-beacon-without-a-watcher case and its stale-beacon alarm, the true-reason banner wording, and the reason-keyed episode dedup surviving a beacon mtime change.
 `tests/fm-kimi-harness.test.sh` covers the separate Kimi crew hook's format preservation, idempotence, refusal cases, token guard, spawn registration, and teardown cleanup.
 `tests/fm-supervision-instructions.test.sh` covers recovery-line ownership and pi-signed's identity-preserving reuse of Pi's protocol.
+`tests/fm-afk-return.test.sh` covers the away-mode-return reset: a successful daemon teardown clears the failure notice, attended alarm, and block budget, while a teardown reported as failed leaves that episode untouched.
 `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` is the opt-in isolated Pi path.
 [`verification/supervision.md`](verification/supervision.md#turn-end-guard) records the active cross-harness empirical evidence, including the 2026-07-24 Claude `asyncRewake` revalidation.

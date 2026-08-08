@@ -121,6 +121,59 @@ test_attached_arm_reports_the_delivered_wake_after_drain() {
   pass "watch-arm: a delivered wake consumed by the handling turn still closes the attached arm cleanly"
 }
 
+# Regression for the dead-successor-attach incident: bin/fm-watch-arm.sh once
+# reported "watcher: attached pid=<N> (beacon <age>s)" for a pid that was
+# already gone (no state/.watch.lock, ps -p returned nothing) because
+# healthy_watcher()'s snapshot can go stale in the gap before an attach commits.
+# attach_target_verified() is the last-moment recheck every attach call site now
+# gates on; source the script (its bottom-of-file guard returns before running
+# anything) to test the helper directly against constructed lock states rather
+# than trying to win the original race under timing pressure.
+test_attach_target_verified_requires_lock_and_live_pid() {
+  local dir state live dead out
+  dir=$(make_case attach-verify)
+  state="$dir/state"
+
+  # Positive control: lock exists, pid genuinely alive.
+  sleep 60 &
+  live=$!
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$live" > "$state/.watch.lock/pid"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    HEALTHY_PID=$2
+    attach_target_verified && echo alive || echo dead
+  ' _ "$WATCH_ARM" "$live")
+  [ "$out" = alive ] || fail "attach_target_verified rejected a genuinely live target with an existing lock: $out"
+
+  # The process died but the lock file has not been cleaned up yet (a
+  # self-eviction/steal race window): the pid must fail the check even though
+  # the lock directory still exists.
+  dead=$(dead_pid)
+  printf '%s\n' "$dead" > "$state/.watch.lock/pid"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    HEALTHY_PID=$2
+    attach_target_verified && echo alive || echo dead
+  ' _ "$WATCH_ARM" "$dead")
+  [ "$out" = dead ] || fail "attach_target_verified reported a dead pid as alive while its stale lock was still present"
+
+  # The lock has already been released (the exact incident: state/.watch.lock
+  # does not exist at all), even though HEALTHY_PID still names a live process
+  # from an earlier, now-stale snapshot. The lock's absence alone must refuse.
+  rm -rf "$state/.watch.lock"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    HEALTHY_PID=$2
+    attach_target_verified && echo alive || echo dead
+  ' _ "$WATCH_ARM" "$live")
+  [ "$out" = dead ] || fail "attach_target_verified claimed a healthy attach with no watch lock present at all"
+
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  pass "watch-arm: attach verification requires both the lock to exist and the pid to resolve, never either alone"
+}
+
 test_attached_arm_still_fails_on_a_wake_it_did_not_deliver() {
   local dir state fakebin out armout status
   dir=$(make_case attached-no-delivery)
@@ -148,4 +201,5 @@ test_attached_arm_still_fails_on_a_wake_it_did_not_deliver() {
 
 test_attached_arm_reports_the_delivered_wake
 test_attached_arm_reports_the_delivered_wake_after_drain
+test_attach_target_verified_requires_lock_and_live_pid
 test_attached_arm_still_fails_on_a_wake_it_did_not_deliver

@@ -20,6 +20,10 @@
 # every live open blocker is closed and `check` succeeds. Repeated begin/check
 # calls are idempotent. `guard` never mutates state and is suitable for ordinary
 # read entrypoints such as fm-bearings-snapshot.sh.
+#
+# A successful daemon teardown also resets the Claude Stop-owned watcher
+# auto-arm's failure-episode state, because away-mode return is a fresh episode
+# boundary that a stale pre-away failure latch must not survive.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -150,6 +154,11 @@ return_reconcile() {
     if ! "$SCRIPT_DIR/fm-afk-launch.sh" stop; then
       lifecycle_ok=0
       append_evidence lifecycle 'away-mode shutdown failed; lifecycle state preserved for retry' "$evidence"
+    else
+      # A pre-away failure latch must not survive into the new episode and
+      # permanently refuse bin/fm-turnend-guard.sh's one-time attended
+      # fail-open. Best-effort: a failed reset only forgoes the fresh episode.
+      fm_failure_episode_reset "$STATE" || true
     fi
   fi
 
