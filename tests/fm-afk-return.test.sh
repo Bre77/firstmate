@@ -209,8 +209,60 @@ test_check_retries_recorded_terminal_teardown() {
   pass "check retries recorded terminal teardown and keeps catch-up gated until success"
 }
 
+# Regression for the away-mode handback deadlock: a Claude auto-arm
+# failure-episode latch recorded before or during away mode used to survive
+# .afk clearing untouched (it is normally cleared only by a positively verified
+# healthy watcher, which recovery itself cannot establish while the latch keeps
+# refusing the turn-end guard's one-time attended fail-open), so the auto-arm
+# never reclaimed the home across repeated turn ends and only a manual
+# bin/fm-watch-arm.sh --restart broke the deadlock.
+test_successful_return_resets_autoarm_failure_episode() {
+  local dir out
+  dir="$TMP_ROOT/autoarm-reset"
+  install_runner "$dir"
+  date +%s > "$dir/home/state/.afk"
+  : > "$dir/home/state/.claude-autoarm-failure-notified"
+  : > "$dir/home/state/.claude-autoarm-failure-alarmed"
+  printf 'session=old\ncount=4\nepoch=1\n' > "$dir/home/state/.turnend-claude-blocks"
+  : > "$dir/home/state/.fake-drain"
+
+  out=$(run_return "$dir" begin) || fail "clean return should succeed: $out"
+  assert_contains "$out" 'catch-up clear' "successful return did not announce ordinary work may proceed"
+  [ ! -e "$dir/home/state/.claude-autoarm-failure-notified" ] \
+    || fail "successful away-mode return left a stale auto-arm failure notice behind, which would keep permanently refusing the attended fail-open"
+  [ ! -e "$dir/home/state/.claude-autoarm-failure-alarmed" ] \
+    || fail "successful away-mode return left a stale auto-arm attended-alarm latch behind"
+  [ ! -e "$dir/home/state/.turnend-claude-blocks" ] \
+    || fail "successful away-mode return left a stale turn-end block budget behind"
+  pass "return: a successful away-mode teardown resets the Claude auto-arm's failure episode so a stale pre-away alarm cannot block recovery"
+}
+
+test_failed_teardown_preserves_autoarm_failure_episode() {
+  local dir out rc
+  dir="$TMP_ROOT/autoarm-reset-failed-teardown"
+  install_runner "$dir"
+  date +%s > "$dir/home/state/.afk"
+  : > "$dir/home/state/.claude-autoarm-failure-notified"
+  : > "$dir/home/state/.claude-autoarm-failure-alarmed"
+  touch "$dir/home/state/.fail-terminal-stop-once"
+  : > "$dir/home/state/.fake-drain"
+
+  set +e
+  out=$(run_return "$dir" begin)
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "a teardown reported as failed should still gate the return (rc=$rc): $out"
+  [ -e "$dir/home/state/.claude-autoarm-failure-notified" ] \
+    || fail "a teardown reported as failed must not reset the auto-arm episode early"
+  [ -e "$dir/home/state/.claude-autoarm-failure-alarmed" ] \
+    || fail "a teardown reported as failed must not reset the auto-arm attended alarm early"
+  pass "return: a daemon teardown reported as failed does not prematurely reset the auto-arm failure episode"
+}
+
 test_return_gate_orders_catchup_before_bearings
 test_explicit_reclassification_requires_durable_reason
 test_captain_decision_does_not_masquerade_as_firstmate_blocker
 test_away_reentry_refuses_pending_return_gate
 test_check_retries_recorded_terminal_teardown
+test_successful_return_resets_autoarm_failure_episode
+test_failed_teardown_preserves_autoarm_failure_episode

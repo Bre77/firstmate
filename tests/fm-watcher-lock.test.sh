@@ -677,6 +677,44 @@ test_arm_starts_and_self_heals() {
   pass "arm starts+confirms a fresh watcher on a clean lock and self-heals a dead-pid lock (never healthy off a dead pid)"
 }
 
+# Regression for the quiet-fleet exit-1 incident: a watcher signaled directly
+# (e.g. process-group teardown between turns) used to `exit 1` from its own HUP/
+# INT/TERM trap, indistinguishable from a genuine internal failure, so the arm
+# reported the alarming "watcher cycle exited 1 without an actionable reason"
+# for what was actually benign. The watcher's trap now reflects the signal in
+# the exit code (128+signum) like the arm's own traps already do, and the arm
+# classifies it honestly instead.
+test_watcher_signal_exit_is_reported_honestly() {
+  local dir state fakebin armout armpid watcher_pid status i
+  dir=$(make_case watcher-signal-exit)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF 'watcher: started pid=' "$armout" || fail "arm did not start before signaling the watcher child"
+  watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  [ -n "$watcher_pid" ] || fail "no watcher pid recorded to signal"
+
+  kill -TERM "$watcher_pid" 2>/dev/null || fail "could not signal the watcher child"
+  wait_for_exit "$armpid" 80
+  status=$?
+  [ "$status" -eq 143 ] || fail "arm did not propagate the watcher's TERM-reflecting exit code (got $status)"
+  grep -qF 'watcher: FAILED - watcher cycle ended by signal TERM (143), not an internal error' "$armout" \
+    || fail "arm did not report the signal-ended cycle honestly: $(cat "$armout")"
+  ! grep -qF 'exited 1 without an actionable reason' "$armout" \
+    || fail "arm still used the misleading generic exited-1 wording for a signaled watcher"
+  grep -q "reason=signal-exit" "$state/.watch-cycle-exits.log" \
+    || fail "signal-ended cycle was not classified signal-exit in the lifecycle ledger"
+  pass "watch-arm: a signal that ends the watcher directly is reported honestly, not as an unexplained internal failure"
+}
+
 test_arm_hup_cleans_child_and_temp_output() {
   local dir state fakebin armout i armpid lock_pid status
   dir=$(make_case arm-hup-cleanup)
@@ -1054,6 +1092,7 @@ test_arm_self_eviction_is_loud_without_successor
 test_arm_attaches_and_waits_for_live_fresh_watcher
 test_attached_arm_signal_is_recorded_in_cycle_ledger
 test_arm_starts_and_self_heals
+test_watcher_signal_exit_is_reported_honestly
 test_arm_hup_cleans_child_and_temp_output
 test_arm_propagates_immediate_wake_before_confirmation
 test_arm_waits_for_peer_beacon_after_child_stands_down

@@ -768,7 +768,11 @@ watcher_cleanup() {
   fm_lock_release "$WATCH_LOCK"
 }
 trap watcher_cleanup EXIT
-trap 'exit 1' HUP INT TERM
+# Reflect the signal in the exit code (128+signum, matching bin/fm-watch-arm.sh's
+# own traps) so a caller can tell a genuine signal apart from a plain exit 1.
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 # This watcher's own pid, as recorded in the lock by fm_lock_claim (which writes
 # ${BASHPID:-$$} from this same main shell). Read directly, never via a command
 # substitution, so it matches the stored holder pid for the self-eviction check.
