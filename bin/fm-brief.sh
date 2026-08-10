@@ -621,12 +621,13 @@ $RULE1
 # Code comments
 A shipped code comment states ONE constraint - the WHY - in isolation. Not history, not narrative, not a cross-reference trail.
 Banned in a shipped code comment: \`see <file>.md\` / \`see docs/...\` pointers, \`docs/plans\` references, design-doc pointers, PR numbers (\`#123\`), report/investigation/audit/RCA references, and \`data/<task>/\` or firstmate task-id references.
-The one exception: a pointer to the project's own \`AGENTS.md\` or \`ARCHITECTURE.md\` is fine - those are the right home for history, rationale, and cross-references, a code comment is not.
+The one exception: a pointer to the project's own \`AGENTS.md\` or \`ARCHITECTURE.md\` is fine - that is the right home for a WHY or constraint that outlives this comment, stated as a current fact rather than history or narrative, and a code comment is not.
 Keep it terse: a comment longer than about 3 lines that narrates instead of stating a single constraint does not belong in shipped code - cut it or move the detail to \`AGENTS.md\`.
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
 Record only project knowledge useful to almost every future session.
+Record current facts only, never history: no dated entries, no PR/deploy/incident records, no narrative - rewrite anything durable as a timeless fact and keep the file bounded, condensing on sight rather than appending forever.
 For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
 If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, add that short self-governance section from \`$FM_ROOT/bin/fm-ensure-agents-md.sh\` in the same pass.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.

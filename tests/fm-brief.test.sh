@@ -560,6 +560,8 @@ test_code_comments_contract() {
     assert_grep "PR numbers (\`#123\`)" "$brief" "$id: code-comment contract lost the PR-number ban"
     assert_grep "AGENTS.md\` or \`ARCHITECTURE.md\` is fine" "$brief" \
       "$id: code-comment contract lost the project AGENTS.md/ARCHITECTURE.md exception"
+    assert_grep "stated as a current fact rather than history or narrative" "$brief" \
+      "$id: code-comment contract lost the AGENTS.md-is-current-fact-not-history framing"
     assert_grep "longer than about 3 lines" "$brief" "$id: code-comment contract lost the terseness bar"
   done
 
@@ -594,6 +596,8 @@ test_ship_project_memory_wording() {
   assert_present "$brief" "brief was not scaffolded"
   assert_grep "Record only project knowledge useful to almost every future session." "$brief" \
     "project-memory contract lost the durable-knowledge bar"
+  assert_grep "Record current facts only, never history" "$brief" \
+    "project-memory contract lost the no-history bar"
   assert_grep "prefer a pointer to the authoritative file, command, or doc over copying the detail" "$brief" \
     "project-memory contract lost pointer-over-copy guidance"
   assert_grep "lacks \`## Maintaining this file\`, add that short self-governance section" "$brief" \

@@ -19,9 +19,11 @@ test_created_agents_md_includes_self_governance() {
   assert_grep "## Maintaining this file" "$agents" "self-governance section heading missing"
   assert_grep "Keep this file for knowledge useful to almost every future agent session in this project." "$agents" \
     "self-governance section lost the future-session bar"
+  assert_grep "State current, practically-useful facts only, never history" "$agents" \
+    "self-governance section lost the no-history bar"
   assert_grep "Do not repeat what the codebase already shows; point to the authoritative file or command instead." "$agents" \
     "self-governance section lost pointer-over-copy guidance"
-  assert_grep "Prefer rewriting or pruning existing entries over appending new ones." "$agents" \
+  assert_grep "Prefer rewriting or pruning existing entries over appending new ones; condense on sight so the file stays bounded rather than growing forever." "$agents" \
     "self-governance section lost rewrite-or-prune guidance"
   assert_grep "When updating this file, preserve this bar for all agents and keep entries concise." "$agents" \
     "self-governance section lost all-agents maintenance guidance"
@@ -134,8 +136,9 @@ test_existing_crlf_agents_md_with_section_stays_unchanged() {
     '## Maintaining this file' \
     '' \
     'Keep this file for knowledge useful to almost every future agent session in this project.' \
+    'State current, practically-useful facts only, never history: no dated entries, no PR or deploy or incident records, no narrative; rewrite anything durable that survives from an event as a timeless fact instead.' \
     'Do not repeat what the codebase already shows; point to the authoritative file or command instead.' \
-    'Prefer rewriting or pruning existing entries over appending new ones.' \
+    'Prefer rewriting or pruning existing entries over appending new ones; condense on sight so the file stays bounded rather than growing forever.' \
     'When updating this file, preserve this bar for all agents and keep entries concise.' > "$repo/AGENTS.md"
   ln -s AGENTS.md "$repo/CLAUDE.md"
   agents="$repo/AGENTS.md"
@@ -171,8 +174,9 @@ test_existing_crlf_agents_md_without_section_preserves_crlf() {
     '## Maintaining this file' \
     '' \
     'Keep this file for knowledge useful to almost every future agent session in this project.' \
+    'State current, practically-useful facts only, never history: no dated entries, no PR or deploy or incident records, no narrative; rewrite anything durable that survives from an event as a timeless fact instead.' \
     'Do not repeat what the codebase already shows; point to the authoritative file or command instead.' \
-    'Prefer rewriting or pruning existing entries over appending new ones.' \
+    'Prefer rewriting or pruning existing entries over appending new ones; condense on sight so the file stays bounded rather than growing forever.' \
     'When updating this file, preserve this bar for all agents and keep entries concise.' > "$repo/.expected"
   cmp -s "$repo/.expected" "$agents" \
     || fail "CRLF AGENTS.md injection did not preserve CRLF line endings"
