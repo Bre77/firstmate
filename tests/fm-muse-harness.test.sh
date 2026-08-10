@@ -106,6 +106,16 @@ exec "$FM_FAKE_MUSE_VERSIONED" -c 'result=$($FM_FAKE_HARNESS_PROBE); printf "%s"
 SH
   chmod +x "$fakebin/muse"
   fm_fake_exit0 "$fakebin" treehouse gh-axi gh
+  # Pin the per-crew memory cap OFF for these cases. The cap wraps a ship launch
+  # in a systemd-run scope that shell-quotes the whole command, so the launch
+  # assertions below would read the wrapper's quoting instead of muse's own
+  # composition, and would flip with whether this host has a usable user systemd
+  # instance. The cap itself is covered by tests/fm-crew-memory-cap.test.sh.
+  cat > "$fakebin/systemd-run" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/systemd-run"
   printf '%s\n' "$fakebin"
 }
 
