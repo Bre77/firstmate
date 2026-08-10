@@ -396,6 +396,25 @@ spawn_task() {  # <id> <home> <project>
     "$ROOT/bin/fm-spawn.sh" "$id" "$project" "sh -c 'sleep 120'" --mode no-mistakes --yolo off --backend herdr
 }
 
+finish_concurrent_spawn() {  # <id> <status> <stdout> <stderr>
+  local id=$1 status=$2 out=$3 err=$4
+  [ "$status" -ne 0 ] || return 0
+  grep -F "task set is locked" "$err" >/dev/null 2>&1 \
+    || fail "concurrent projected spawn $id failed unexpectedly: $(cat "$err")"
+  spawn_task "$id" "$HOME_DIR" "$PROJECT_DIR" > "$out" 2> "$err" \
+    || fail "projected spawn $id retry failed after task-set publication completed: $(cat "$err")"
+}
+
+finish_concurrent_expected_abort() {  # <id> <status> <stdout> <stderr>
+  local id=$1 status=$2 out=$3 err=$4
+  [ "$status" -ne 0 ] || fail "post-create abort fixture $id unexpectedly succeeded"
+  if grep -F "task set is locked" "$err" >/dev/null 2>&1; then
+    if spawn_task "$id" "$HOME_DIR" "$PROJECT_DIR" > "$out" 2> "$err"; then
+      fail "post-create abort fixture $id unexpectedly succeeded after task-set publication completed"
+    fi
+  fi
+}
+
 spawn_secondmate_task() {
   local id=$1 home=$2
   FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
@@ -515,27 +534,51 @@ pass "real Herdr lab: an opted-out spawn retains the Stage 1 Herdr command seque
 teardown_task shape "$HOME_DIR" > "$TMP_ROOT/off-teardown.out" 2> "$TMP_ROOT/off-teardown.err" \
   || fail "opted-out teardown failed: $(cat "$TMP_ROOT/off-teardown.err")"
 
-# A home that configured nothing at all must be projected: this is the default,
-# and the only difference from the opted-out spawn above is the removed file.
+# A home that configured nothing at all follows the version floor: it is
+# projected on a release at or above it, and takes the ordinary flat layout with
+# one naming warning below it. The only difference from the opted-out spawn
+# above is the removed file, so this case is the floor's live end-user proof on
+# whichever Herdr this lab is running.
 rm -f "$HOME_DIR/config/herdr-presentation-spaces"
+FLOOR_STATUS=$(lab status --json) || fail 'could not read the lab release for the presentation floor'
+FLOOR_VERSION=$(printf '%s' "$FLOOR_STATUS" | jq -r 'if .server.running then .server.version else .client.version end')
+FLOOR_PROTOCOL=$(printf '%s' "$FLOOR_STATUS" | jq -r 'if .server.running then .server.protocol else .client.protocol end')
+FLOOR_VERDICT=$(bash -c '
+  . "$0/bin/backends/herdr.sh"
+  status=0
+  fm_backend_herdr_release_floor_verdict "$1" "$2" || status=$?
+  printf "%s\n" "$status"
+' "$ROOT" "$FLOOR_PROTOCOL" "$FLOOR_VERSION")
+[ "$FLOOR_VERDICT" = 0 ] || [ "$FLOOR_VERDICT" = 1 ] \
+  || fail "herdr $FLOOR_VERSION protocol $FLOOR_PROTOCOL could not be classified against the presentation floor"
 spawn_task default-on "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/default-on.out" 2> "$TMP_ROOT/default-on.err" \
   || fail "default-on spawn failed: $(cat "$TMP_ROOT/default-on.err")"
 DEFAULT_ON_META="$HOME_DIR/state/default-on.meta"
 remember_meta_worktree "$DEFAULT_ON_META" >/dev/null
 DEFAULT_ON_JOURNAL="$HOME_DIR/state/default-on.herdr-presentation"
-[ -f "$DEFAULT_ON_JOURNAL" ] \
-  || fail "an unconfigured home did not publish a presentation journal by default"
-DEFAULT_ON_TOKEN=$(grep '^projection_id=' "$DEFAULT_ON_JOURNAL" | cut -d= -f2-)
 DEFAULT_ON_WSID=$(grep '^herdr_workspace_id=' "$DEFAULT_ON_META" | cut -d= -f2-)
-[ -n "$DEFAULT_ON_WSID" ] && [ "$DEFAULT_ON_WSID" != "$FIRSTMATE_WSID" ] \
-  || fail "an unconfigured home reused the flat firstmate workspace instead of projecting"
-DEFAULT_ON_LABEL=$(lab workspace get "$DEFAULT_ON_WSID" | jq -r '.result.workspace.label // empty')
-[ "$DEFAULT_ON_LABEL" = "└ default-on · p:$DEFAULT_ON_TOKEN" ] \
-  || fail "default-on projection used an unexpected workspace label: $DEFAULT_ON_LABEL"
-pass "real Herdr lab: a home that configured nothing is projected by default"
+if [ "$FLOOR_VERDICT" = 0 ]; then
+  [ -f "$DEFAULT_ON_JOURNAL" ] \
+    || fail "an unconfigured home did not publish a presentation journal on supported herdr $FLOOR_VERSION"
+  DEFAULT_ON_TOKEN=$(grep '^projection_id=' "$DEFAULT_ON_JOURNAL" | cut -d= -f2-)
+  [ -n "$DEFAULT_ON_WSID" ] && [ "$DEFAULT_ON_WSID" != "$FIRSTMATE_WSID" ] \
+    || fail "an unconfigured home reused the flat firstmate workspace instead of projecting"
+  DEFAULT_ON_LABEL=$(lab workspace get "$DEFAULT_ON_WSID" | jq -r '.result.workspace.label // empty')
+  [ "$DEFAULT_ON_LABEL" = "└ default-on · p:$DEFAULT_ON_TOKEN" ] \
+    || fail "default-on projection used an unexpected workspace label: $DEFAULT_ON_LABEL"
+  pass "real Herdr lab: a home that configured nothing is projected by default on herdr $FLOOR_VERSION"
+else
+  [ ! -e "$DEFAULT_ON_JOURNAL" ] \
+    || fail "an unconfigured home published a presentation journal on below-floor herdr $FLOOR_VERSION"
+  [ "$DEFAULT_ON_WSID" = "$FIRSTMATE_WSID" ] \
+    || fail "an unconfigured home did not land in the flat firstmate workspace on below-floor herdr $FLOOR_VERSION (got '${DEFAULT_ON_WSID:-<empty>}')"
+  grep -q "$FLOOR_VERSION" "$TMP_ROOT/default-on.err" \
+    || fail "the below-floor fallback did not name herdr $FLOOR_VERSION: $(cat "$TMP_ROOT/default-on.err")"
+  pass "real Herdr lab: a home that configured nothing falls back flat on below-floor herdr $FLOOR_VERSION with one naming warning"
+fi
 teardown_task default-on "$HOME_DIR" > "$TMP_ROOT/default-on-teardown.out" 2> "$TMP_ROOT/default-on-teardown.err" \
   || fail "default-on teardown failed: $(cat "$TMP_ROOT/default-on-teardown.err")"
-if lab workspace get "$DEFAULT_ON_WSID" >/dev/null 2>&1; then
+if [ "$FLOOR_VERDICT" = 0 ] && lab workspace get "$DEFAULT_ON_WSID" >/dev/null 2>&1; then
   fail "default-on teardown left its disposable workspace behind"
 fi
 # The ordering scenarios below read the whole move log cumulatively against the
@@ -704,7 +747,9 @@ normalize_meta "$ON_META" > "$TMP_ROOT/on.meta.normalized"
 cmp -s "$TMP_ROOT/off.meta.normalized" "$TMP_ROOT/on.meta.normalized" \
   || fail "metadata changed beyond Herdr container IDs between opted-out and projected paths"
 
-# Two real concurrent primary spawns share the bounded presentation-order lock.
+# Two real primary spawns begin concurrently.
+# The fresh-spawn task-set lock may fail closed for one while the other
+# publishes, in which case retry it only after the lock owner has completed.
 # Their final relative order must match Herdr's actual serialized create order,
 # rather than a task-name or priority guess.
 CONCURRENT_FOCUS_AUDIT_START=$(focus_audit_line_count)
@@ -712,8 +757,10 @@ spawn_task order-a "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/order-a.out" 2> "$TMP
 ORDER_A_PID=$!
 spawn_task order-b "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/order-b.out" 2> "$TMP_ROOT/order-b.err" &
 ORDER_B_PID=$!
-wait "$ORDER_A_PID" || fail "concurrent projected spawn A failed: $(cat "$TMP_ROOT/order-a.err")"
-wait "$ORDER_B_PID" || fail "concurrent projected spawn B failed: $(cat "$TMP_ROOT/order-b.err")"
+if wait "$ORDER_A_PID"; then ORDER_A_STATUS=0; else ORDER_A_STATUS=$?; fi
+if wait "$ORDER_B_PID"; then ORDER_B_STATUS=0; else ORDER_B_STATUS=$?; fi
+finish_concurrent_spawn order-a "$ORDER_A_STATUS" "$TMP_ROOT/order-a.out" "$TMP_ROOT/order-a.err"
+finish_concurrent_spawn order-b "$ORDER_B_STATUS" "$TMP_ROOT/order-b.out" "$TMP_ROOT/order-b.err"
 assert_focus_is "$CAPTAIN_FOCUS" "concurrent projected spawns"
 assert_raw_presentation_mutations_preserved_since "$CONCURRENT_FOCUS_AUDIT_START" "concurrent projected spawns"
 ORDER_A_META="$HOME_DIR/state/order-a.meta"
@@ -787,8 +834,10 @@ spawn_task abort-a "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/abort-a.out" 2> "$TMP
 ABORT_A_PID=$!
 spawn_task abort-b "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/abort-b.out" 2> "$TMP_ROOT/abort-b.err" &
 ABORT_B_PID=$!
-if wait "$ABORT_A_PID"; then fail "post-create abort fixture A unexpectedly succeeded"; fi
-if wait "$ABORT_B_PID"; then fail "post-create abort fixture B unexpectedly succeeded"; fi
+if wait "$ABORT_A_PID"; then ABORT_A_STATUS=0; else ABORT_A_STATUS=$?; fi
+if wait "$ABORT_B_PID"; then ABORT_B_STATUS=0; else ABORT_B_STATUS=$?; fi
+finish_concurrent_expected_abort abort-a "$ABORT_A_STATUS" "$TMP_ROOT/abort-a.out" "$TMP_ROOT/abort-a.err"
+finish_concurrent_expected_abort abort-b "$ABORT_B_STATUS" "$TMP_ROOT/abort-b.out" "$TMP_ROOT/abort-b.err"
 # The abort fixtures report a non-worktree cwd. The proven-worktree spawn poll
 # rejects it at the poll and hits the "did not enter a worktree within 60s"
 # timeout instead of the now-unreachable validate_spawn_worktree message; the
@@ -868,8 +917,10 @@ for ROUND in 1 2 3; do
   WAVE_A_PID=$!
   spawn_task "focus-$ROUND-b" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/focus-$ROUND-b.out" 2> "$TMP_ROOT/focus-$ROUND-b.err" &
   WAVE_B_PID=$!
-  wait "$WAVE_A_PID" || fail "focus wave $ROUND spawn A failed: $(cat "$TMP_ROOT/focus-$ROUND-a.err")"
-  wait "$WAVE_B_PID" || fail "focus wave $ROUND spawn B failed: $(cat "$TMP_ROOT/focus-$ROUND-b.err")"
+  if wait "$WAVE_A_PID"; then WAVE_A_STATUS=0; else WAVE_A_STATUS=$?; fi
+  if wait "$WAVE_B_PID"; then WAVE_B_STATUS=0; else WAVE_B_STATUS=$?; fi
+  finish_concurrent_spawn "focus-$ROUND-a" "$WAVE_A_STATUS" "$TMP_ROOT/focus-$ROUND-a.out" "$TMP_ROOT/focus-$ROUND-a.err"
+  finish_concurrent_spawn "focus-$ROUND-b" "$WAVE_B_STATUS" "$TMP_ROOT/focus-$ROUND-b.out" "$TMP_ROOT/focus-$ROUND-b.err"
   remember_meta_worktree "$HOME_DIR/state/focus-$ROUND-a.meta" >/dev/null
   remember_meta_worktree "$HOME_DIR/state/focus-$ROUND-b.meta" >/dev/null
   assert_focus_is "$CAPTAIN_FOCUS" "focus wave $ROUND concurrent spawns"

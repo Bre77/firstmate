@@ -897,8 +897,10 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
     # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
     assert_no_grep '`paused: {why}`' "$brief" \
       "$kind brief still instructs the default paused status"
-    assert_grep 'or a blocker clears' "$brief" \
+    assert_grep 'a blocker or wait clears' "$brief" \
       "$kind brief did not require durable resolution when a blocker clears"
+    assert_grep 'even when the answer is what started that work' "$brief" \
+      "$kind brief did not warn that an answer-started done/working never closes a decision"
   done
   pass "fm-brief.sh: custom pause verb renders in every scaffold"
 }
@@ -942,7 +944,7 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
-test_scheduled_wait_and_decision_key_wording() {
+test_scheduled_wait_wording() {
   local home brief
   home="$TMP_ROOT/scheduled-wait-home"
   mkdir -p "$home/data"
@@ -955,12 +957,6 @@ test_scheduled_wait_and_decision_key_wording() {
   # shellcheck disable=SC2016 # Literal backticks are deliberate: pinning the example text verbatim.
   assert_grep '`paused: canary deploy verification until 14:30 UTC`' "$brief" \
     "ship brief dropped the scheduled-wait pause example"
-  # shellcheck disable=SC2016 # Literal backticks are deliberate: pinning the example format verbatim.
-  assert_grep '`needs-decision [key=<slug>]: {summary of options}`' "$brief" \
-    "ship brief did not show the decision-key position on needs-decision"
-  # shellcheck disable=SC2016 # Literal backticks are deliberate: pinning the example format verbatim.
-  assert_grep '`resolved [key=<slug>]: {how it was decided or unblocked}`' "$brief" \
-    "ship brief did not show the decision-key position on resolved"
 
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-sched-scout firstmate --scout >/dev/null 2>&1 \
     || fail "fm-brief.sh scout scaffold exited non-zero"
@@ -970,12 +966,6 @@ test_scheduled_wait_and_decision_key_wording() {
   # shellcheck disable=SC2016 # Literal backticks are deliberate: pinning the example text verbatim.
   assert_grep '`paused: canary deploy verification until 14:30 UTC`' "$brief" \
     "scout brief dropped the scheduled-wait pause example"
-  # shellcheck disable=SC2016 # Literal backticks are deliberate: pinning the example format verbatim.
-  assert_grep '`needs-decision [key=<slug>]: {summary of options}`' "$brief" \
-    "scout brief did not show the decision-key position on needs-decision"
-  # shellcheck disable=SC2016 # Literal backticks are deliberate: pinning the example format verbatim.
-  assert_grep '`resolved [key=<slug>]: {how it was decided or unblocked}`' "$brief" \
-    "scout brief did not show the decision-key position on resolved"
 
   FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
     FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-sched-sm --secondmate --no-projects >/dev/null 2>&1 \
@@ -983,19 +973,28 @@ test_scheduled_wait_and_decision_key_wording() {
   brief="$home/data/brief-sched-sm/brief.md"
   assert_grep "For a KNOWN timed wait (a deploy verification window, a rate-limit reset, an upstream release)," "$brief" \
     "secondmate charter did not instruct a concrete scheduled-wait pause line"
-  # shellcheck disable=SC2016 # Literal backticks are deliberate: pinning the example format verbatim.
-  assert_grep 'The key sits between the verb and the colon on both sides: `needs-decision [key=<slug>]: <summary>` opens it, `resolved [key=<slug>]: <how>` closes it.' "$brief" \
-    "secondmate charter did not show the decision-key position for both verbs"
 
-  pass "fm-brief.sh: scheduled-wait pause instructions and decision-key positions are pinned"
+  pass "fm-brief.sh: scheduled-wait pause instructions are pinned in every scaffold"
 }
 
-# The scaffold text must not just READ as before-colon; a status line built from
-# it must actually FOLD under the crew's chosen key rather than "default" per
-# bin/fm-classify-lib.sh's _fm_decision_key, which is the parser every crew's
-# needs-decision/resolved pair is ultimately checked against.
+# Extract the scaffold's own fenced `<verb>: ...` example, with the placeholder
+# slug filled in so the line is what a crew would really append.
+brief_decision_example() {  # <brief> <verb> [required-substring] -> status line
+  local brief=$1 verb=$2 want=${3:-} line
+  # shellcheck disable=SC2016 # Literal backticks are deliberate: matching the brief's own markdown fencing.
+  line=$(sed -n "s/.*\`\(${verb}[^\`]*:[^\`]*\)\`.*/\\1/p" "$brief" \
+    | { if [ -n "$want" ]; then grep -F "$want"; else cat; fi; } | head -n1)
+  [ -n "$line" ] || return 1
+  line=${line//<slug>/api-shape}
+  printf '%s' "${line//<work-slug>/alpha-phase}"
+}
+
+# The scaffold's own needs-decision/resolved examples must actually round-trip
+# CLOSED through bin/fm-classify-lib.sh, the parser every crew's pair is really
+# checked against. A scaffold whose own example pair folds to two different keys
+# teaches crews to open decisions nothing will ever close.
 test_ship_brief_decision_instruction_matches_the_parseable_form() {
-  local home brief line
+  local home brief open_line resolve_line status
   home="$TMP_ROOT/decision-key-parseable-home"
   mkdir -p "$home/data"
 
@@ -1006,16 +1005,20 @@ test_ship_brief_decision_instruction_matches_the_parseable_form() {
   # shellcheck source=bin/fm-classify-lib.sh
   . "$ROOT/bin/fm-classify-lib.sh"
 
-  line=$(grep -F 'needs-decision [key=<slug>]:' "$brief" | head -n1) \
-    && [ -n "$line" ] || fail "ship brief has no before-colon needs-decision instruction to test"
-  line=${line//<slug>/api-shape}
-  # shellcheck disable=SC2016 # Literal backticks are deliberate: matching the brief's own markdown fencing.
-  line=$(printf '%s' "$line" | sed -n 's/.*`\(needs-decision [^`]*\)`.*/\1/p')
-  [ -n "$line" ] || fail "could not extract the literal needs-decision example from the ship brief"
-  [ "$(_fm_decision_key "$line")" = api-shape ] \
-    || fail "the ship brief's own needs-decision example does not fold under its stated key: $line"
+  open_line=$(brief_decision_example "$brief" needs-decision) \
+    || fail "ship brief has no literal needs-decision example to test"
+  resolve_line=$(brief_decision_example "$brief" resolved) \
+    || fail "ship brief has no literal resolved example to test"
 
-  pass "fm-brief.sh: the ship brief's needs-decision instruction parses under the real decision-key fold"
+  [ "$(_fm_decision_key "$open_line")" = "$(_fm_decision_key "$resolve_line")" ] \
+    || fail "the ship brief's own example pair folds under two different keys: $open_line / $resolve_line"
+
+  status="$home/data/brief-parseable-ship/round-trip.status"
+  printf '%s\n%s\n' "$open_line" "$resolve_line" > "$status"
+  [ -z "$(status_open_decisions "$status")" ] \
+    || fail "the ship brief's own needs-decision/resolved pair does not fold closed: $(cat "$status")"
+
+  pass "fm-brief.sh: the ship brief's decision examples round-trip closed under the real fold"
 }
 
 # The secondmate charter's "resolved" instruction for an escalated decision
@@ -1041,22 +1044,15 @@ test_secondmate_charter_decision_resolve_round_trips() {
   # shellcheck source=bin/fm-classify-lib.sh
   . "$ROOT/bin/fm-classify-lib.sh"
 
-  # shellcheck disable=SC2016 # Literal backticks are deliberate: matching the brief's own markdown fencing.
-  open_line=$(grep -F 'needs-decision [key=<slug>]:' "$brief" | head -n1) \
-    && [ -n "$open_line" ] || fail "secondmate charter has no before-colon needs-decision instruction to test"
-  # shellcheck disable=SC2016 # Literal backticks are deliberate: matching the brief's own markdown fencing.
-  open_line=$(printf '%s' "$open_line" | sed -n 's/.*`\(needs-decision [^`]*\)`.*/\1/p')
-  [ -n "$open_line" ] || fail "could not extract the literal needs-decision example from the secondmate charter"
+  # The charter's keyed pair is its phase pair: a keyed `working` line opens the
+  # phase and the keyed `resolved` line the charter shows is what supersedes it.
+  open_line=$(brief_decision_example "$brief" working '[key=') \
+    || fail "secondmate charter has no literal keyed working example to test"
+  resolve_line=$(brief_decision_example "$brief" resolved) \
+    || fail "secondmate charter has no literal resolved example to test"
 
-  # shellcheck disable=SC2016 # Literal backticks are deliberate: matching the brief's own markdown fencing.
-  resolve_line=$(grep -F 'resolved [key=<slug>]: {how it was decided or unblocked}' "$brief" | head -n1) \
-    && [ -n "$resolve_line" ] || fail "secondmate charter dropped the positioned resolved-escalated-decision example"
-  # shellcheck disable=SC2016 # Literal backticks are deliberate: matching the brief's own markdown fencing.
-  resolve_line=$(printf '%s' "$resolve_line" | sed -n 's/.*`\(resolved [^`]*\)`.*/\1/p')
-  [ -n "$resolve_line" ] || fail "could not extract the literal resolved example from the secondmate charter"
-
-  open_line=${open_line//<slug>/api-shape}
-  resolve_line=${resolve_line//<slug>/api-shape}
+  [ "$(_fm_decision_key "$open_line")" = "$(_fm_decision_key "$resolve_line")" ] \
+    || fail "the charter's own example pair folds under two different keys: $open_line / $resolve_line"
 
   status="$home/data/brief-parseable-sm/round-trip.status"
   printf '%s\n%s\n' "$open_line" "$resolve_line" > "$status"
@@ -1093,6 +1089,6 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
-test_scheduled_wait_and_decision_key_wording
+test_scheduled_wait_wording
 test_ship_brief_decision_instruction_matches_the_parseable_form
 test_secondmate_charter_decision_resolve_round_trips
