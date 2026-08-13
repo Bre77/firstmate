@@ -214,17 +214,6 @@ set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-usage() {
-  # The whole leading comment block, ending at the first line that is not a
-  # comment. Derived rather than a fixed line range, which silently truncated
-  # this help mid-sentence every time the header above grew.
-  sed -n '2,${/^#/!q;p;}' "$0" | sed 's/^# \{0,1\}//'
-}
-
-case "${1:-}" in
-  -h|--help) usage; exit 0 ;;
-esac
-
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
@@ -1436,79 +1425,6 @@ wrap_launch_with_memory_cap() {
   local launch=$1
   printf 'systemd-run --user --scope --slice=firstmate-crew.slice -p MemoryHigh=%s -p MemoryMax=%s -p MemorySwapMax=%s -- bash -c %s' \
     "$FM_CREW_MEMORY_HIGH" "$FM_CREW_MEMORY_MAX" "$FM_CREW_MEMORY_SWAP" "$(shell_quote "$launch")"
-}
-
-resolve_kimi_binary() {
-  local candidate dir fallback
-  candidate=$(command -v kimi 2>/dev/null || true)
-  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
-    case "$candidate" in
-      /*) printf '%s\n' "$candidate"; return 0 ;;
-      *)
-        dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || dir=
-        if [ -n "$dir" ]; then
-          printf '%s/%s\n' "$dir" "$(basename "$candidate")"
-          return 0
-        fi
-        ;;
-    esac
-  fi
-  fallback="${HOME:-}/.kimi-code/bin/kimi"
-  if [ -n "${HOME:-}" ] && [ -x "$fallback" ]; then
-    printf '%s\n' "$fallback"
-    return 0
-  fi
-  echo "error: kimi executable not found; searched PATH for 'kimi' and fallback '$fallback'" >&2
-  return 1
-}
-
-resolve_muse_binary() {
-  local candidate dir
-  candidate=$(command -v muse 2>/dev/null || true)
-  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
-    case "$candidate" in
-      /*) printf '%s\n' "$candidate"; return 0 ;;
-      *)
-        dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || dir=
-        if [ -n "$dir" ]; then
-          printf '%s/%s\n' "$dir" "$(basename "$candidate")"
-          return 0
-        fi
-        ;;
-    esac
-  fi
-  echo "error: muse executable not found on PATH; install Muse Code or select a different verified harness" >&2
-  return 1
-}
-
-# muse_credential_present: 0 when a launched muse pane can reach its provider
-# without an interactive login. muse offers exactly two credential paths
-# (verified, muse 0.1.0-R708.1): the META_API_KEY environment variable, which
-# always takes priority, and a stored credential written by `muse auth set` or
-# `muse login` into <config>/muse/auth.json. This is a PREFLIGHT rather than a
-# rendered-screen check because an unauthenticated pane does not exit - it sits
-# on an OAuth device-code prompt ("Sign in at this page ... Waiting for
-# approval...") waiting for a human who is not there, which would look to
-# supervision like a wedged worker rather than a missing credential.
-muse_worker_meta_api_key_present() {
-  local session worker_env
-  [ "$BACKEND" = tmux ] || return 1
-  if [ -n "${TMUX:-}" ]; then
-    session=$(tmux display-message -p '#S' 2>/dev/null) || return 1
-  else
-    tmux has-session -t firstmate 2>/dev/null || return 1
-    session=firstmate
-  fi
-  worker_env=$(tmux show-environment -t "$session" META_API_KEY 2>/dev/null) || return 1
-  case "$worker_env" in
-    META_API_KEY=?*) return 0 ;;
-  esac
-  return 1
-}
-
-muse_credential_present() {
-  local auth=$1
-  [ -s "$auth" ] || muse_worker_meta_api_key_present
 }
 
 model_flag_for_harness() {
