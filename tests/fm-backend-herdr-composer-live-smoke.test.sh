@@ -81,8 +81,16 @@ out=$(fm_backend_herdr_composer_state "$TARGET")
 pass "real herdr: composer_state reads pending for a live bare '<glyph> text' composer row"
 
 # --- composer_state: a bordered ghost/placeholder row is empty --------------
+# A real bordered composer always draws a complete box (top and bottom rule),
+# never a lone side-bordered row: the shared classifier's box detector
+# requires that pair to recognize a box shape at all, matching what every
+# real agent (Claude, Codex, ...) actually renders. The placeholder text
+# itself must carry real dim (SGR 2) styling too - herdr's ANSI capture
+# always reports styled=1, and the classifier only trusts an idle-regex
+# match as ghost/placeholder text under styled=1 when de-emphasis proves it,
+# exactly like the dim-ghost assertions below this one.
 
-fm_backend_herdr_send_text_line "$TARGET" 'printf "\xe2\x94\x82 Type a message... \xe2\x94\x82\n"' || fail "could not drive the bordered ghost-placeholder shape"
+fm_backend_herdr_send_text_line "$TARGET" 'printf "\xe2\x95\xad\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x95\xae\n\xe2\x94\x82 \x1b[0m\x1b[2mType a message...\x1b[0m      \xe2\x94\x82\n\xe2\x95\xb0\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x95\xaf\n"' || fail "could not drive the bordered ghost-placeholder shape"
 sleep 0.5
 out=$(fm_backend_herdr_composer_state "$TARGET")
 [ "$out" = empty ] || fail "a live bordered ghost-placeholder row should read empty, got '$out'"

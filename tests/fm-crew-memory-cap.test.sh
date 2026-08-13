@@ -124,7 +124,7 @@ run_spawn_with_env() {
 
 expected_unwrapped_claude_launch() {
   local brief=$1
-  printf '%s' "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions --settings '{\"attribution\":{\"commit\":\"\"}}' \"\$('$ROOT/bin/fm-operational-input.sh' encode launch-brief < '$brief')\""
+  printf '%s' "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions --settings '{\"attribution\":{\"commit\":\"\"}}' \"\$('$ROOT/bin/fm-operational-input.sh' encode launch-brief < '$brief')\""
 }
 
 # Given a full launch string wrapped as:
