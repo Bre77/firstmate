@@ -1051,7 +1051,7 @@ _fm_composer_leftbar_floor_row() {  # <trimmed-row>
 }
 
 _fm_composer_select_cursorless() {
-  local plain=$1 generic=-1 next boundary raw trimmed
+  local plain=$1 generic=-1 next boundary raw trimmed glyph
   FM_COMPOSER_SELECTED_KIND=
   FM_COMPOSER_SELECTED_FIRST=-1
   FM_COMPOSER_SELECTED_LAST=-1
@@ -1104,6 +1104,16 @@ _fm_composer_select_cursorless() {
       fm_composer_normalize_trim_var trimmed
       [ -n "$trimmed" ] || break
       fm_composer_row_has_edge "$trimmed" && break
+      # A fresh shell prompt row ends the bare composer above it rather than
+      # continuing it as wrapped input, matching the cursored sibling check in
+      # _fm_composer_wrap_region_ok. A real PS1 usually carries its glyph at
+      # the END of the row (user@host:path$), not the start, so check both
+      # positions rather than only the leading-glyph case the sibling check
+      # uses.
+      fm_composer_leading_shell_glyph_var glyph "$trimmed" && break
+      case "$trimmed" in
+        *'>'|*'$'|*'%'|*'#') break ;;
+      esac
       FM_COMPOSER_SELECTED_LAST=$next
       next=$((next + 1))
     done
