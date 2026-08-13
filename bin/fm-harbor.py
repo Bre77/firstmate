@@ -39,6 +39,8 @@ from urllib.parse import urlparse
 DONE_TAIL = 8
 REFRESH_SECONDS = 30
 BIND = "127.0.0.1"  # never configurable: loopback-only is a hard safety rule.
+TRUNCATION_MARKER = "(truncated,"  # tasks-axi list's at-source title-truncation tag.
+SUMMARY_HEAD_LEN = 80
 
 
 class AxiError(Exception):
@@ -84,6 +86,44 @@ def _parse_rows(output):
         values = next(reader, [])
         rows.append(dict(zip(fields, values)))
     return rows
+
+
+def _is_truncated(title):
+    return TRUNCATION_MARKER in (title or "")
+
+
+def _full_title(backlog_file, task_id, cache):
+    """The complete title for task_id, fetched once via `show --full` and
+    cached: several rows or blocked-by references can name the same id."""
+    if task_id in cache:
+        return cache[task_id]
+    output = _run_tasks_axi(backlog_file, ["show", task_id, "--full"])
+    prefix = "  title: "
+    title = task_id
+    for line in output.splitlines():
+        if not line.startswith(prefix):
+            continue
+        raw = line[len(prefix):]
+        if raw.startswith('"'):
+            reader = csv.reader(io.StringIO(raw), doublequote=False, escapechar="\\")
+            values = next(reader, [raw])
+            title = values[0] if values else ""
+        else:
+            title = raw
+        break
+    cache[task_id] = title
+    return title
+
+
+def _resolved_title(row, backlog_file, cache):
+    """A row's title, with any at-source truncation replaced by the full text."""
+    title = row.get("title", "")
+    if not _is_truncated(title):
+        return title
+    try:
+        return _full_title(backlog_file, row.get("id", ""), cache)
+    except AxiError:
+        return title
 
 
 def _list_tasks(backlog_file, state=None, fields=None, limit=None):
@@ -146,6 +186,8 @@ def _gather_groups(backlog_file):
         "waiting_on_you": waiting_on_you,
         "queued_blocked": queued_blocked,
         "done": done,
+        "backlog_file": backlog_file,
+        "full_title_cache": {},
     }
 
 
@@ -153,11 +195,19 @@ def _esc(value):
     return html.escape(value or "", quote=True)
 
 
-def _blocked_by_line(row, id_title):
+def _blocked_by_line(row, id_title, backlog_file, cache):
     ids = _split_ids(row.get("blocked_by", ""))
     if not ids:
         return None
-    labels = [f"{id_title.get(i, i)} ({i})" if id_title.get(i) else i for i in ids]
+    labels = []
+    for i in ids:
+        title = id_title.get(i, "")
+        if _is_truncated(title):
+            try:
+                title = _full_title(backlog_file, i, cache)
+            except AxiError:
+                pass
+        labels.append(f"{title} ({i})" if title else i)
     return "Blocked by: " + ", ".join(_esc(label) for label in labels)
 
 
@@ -178,8 +228,19 @@ def _pr_line(row):
     return f'PR: <a href="{safe}">{safe}</a>'
 
 
-def _task_card(row, notes):
-    title = _esc(row.get("title", row.get("id", "")))
+def _title_html(row, backlog_file, cache):
+    raw_title = row.get("title", row.get("id", ""))
+    if not _is_truncated(raw_title):
+        return _esc(raw_title)
+    full_title = _resolved_title(row, backlog_file, cache)
+    head = full_title.splitlines()[0] if full_title else full_title
+    if len(head) > SUMMARY_HEAD_LEN:
+        head = head[:SUMMARY_HEAD_LEN].rstrip() + "…"
+    return f"<details><summary>{_esc(head)}</summary>{_esc(full_title)}</details>"
+
+
+def _task_card(row, notes, backlog_file, cache):
+    title = _title_html(row, backlog_file, cache)
     task_id = _esc(row.get("id", ""))
     repo = _esc(row.get("repo", ""))
     kind = _esc(row.get("kind", ""))
@@ -203,9 +264,11 @@ def _section(heading, empty_text, cards, extra_class=""):
 
 def _render_groups(groups):
     id_title = groups["id_title"]
+    backlog_file = groups["backlog_file"]
+    cache = groups["full_title_cache"]
 
     waiting_cards = [
-        _task_card(row, [_hold_line(row), _pr_line(row)])
+        _task_card(row, [_hold_line(row), _pr_line(row)], backlog_file, cache)
         for row in groups["waiting_on_you"]
     ]
     in_flight_cards = []
@@ -213,12 +276,19 @@ def _render_groups(groups):
         notes = [_pr_line(row)]
         if row.get("held") == "yes" and row.get("hold_kind") != "captain":
             notes.append(_hold_line(row))
-        in_flight_cards.append(_task_card(row, notes))
+        in_flight_cards.append(_task_card(row, notes, backlog_file, cache))
     queued_cards = [
-        _task_card(row, [_blocked_by_line(row, id_title), _hold_line(row)])
+        _task_card(
+            row,
+            [_blocked_by_line(row, id_title, backlog_file, cache), _hold_line(row)],
+            backlog_file, cache,
+        )
         for row in groups["queued_blocked"]
     ]
-    done_cards = [_task_card(row, [_pr_line(row)]) for row in groups["done"]]
+    done_cards = [
+        _task_card(row, [_pr_line(row)], backlog_file, cache)
+        for row in groups["done"]
+    ]
 
     return "".join([
         _section("Waiting on you", "Nothing waiting on you right now.",
@@ -243,6 +313,8 @@ PAGE_STYLE = """
   .task { padding: 0.6rem 0; border-bottom: 1px solid #eee; }
   .task:last-child { border-bottom: none; }
   .title { font-weight: 600; }
+  .title summary { cursor: pointer; }
+  .title details { display: inline; }
   .id { font-weight: 400; font-family: ui-monospace, Menlo, monospace;
         font-size: 0.8rem; color: #888; white-space: nowrap; }
   .context { color: #666; font-size: 0.85rem; }
