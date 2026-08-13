@@ -1107,12 +1107,14 @@ _fm_composer_select_cursorless() {
       # A fresh shell prompt row ends the bare composer above it rather than
       # continuing it as wrapped input, matching the cursored sibling check in
       # _fm_composer_wrap_region_ok. A real PS1 usually carries its glyph at
-      # the END of the row (user@host:path$), not the start, so check both
-      # positions rather than only the leading-glyph case the sibling check
-      # uses.
+      # the END of the row (user@host:path$) rather than the start, and a
+      # freshly typed command can follow that glyph on the same row
+      # (user@host:path$ some-command), so check for the glyph as a whole row,
+      # as a trailing glyph, and as a glyph immediately followed by a space
+      # anywhere in the row, not only the sibling check's leading-glyph case.
       fm_composer_leading_shell_glyph_var glyph "$trimmed" && break
       case "$trimmed" in
-        *'>'|*'$'|*'%'|*'#') break ;;
+        *'>'|*'$'|*'%'|*'#'|*'> '*|*'$ '*|*'% '*|*'# '*) break ;;
       esac
       FM_COMPOSER_SELECTED_LAST=$next
       next=$((next + 1))
@@ -1136,7 +1138,15 @@ _fm_composer_select_cursorless() {
     raw=$(_fm_composer_screen_row "$next" "$plain")
     trimmed=$raw
     fm_composer_normalize_trim_var trimmed
-    if [ -n "$trimmed" ] && ! fm_composer_row_has_edge "$trimmed"; then
+    # A fresh shell prompt directly below the container is the terminal
+    # returning to plain shell, not ambiguous trailing content - the same
+    # exemption the bare-composer wrap-extension loop above applies.
+    if [ -n "$trimmed" ] && ! fm_composer_row_has_edge "$trimmed" \
+       && ! fm_composer_leading_shell_glyph_var glyph "$trimmed" \
+       && case "$trimmed" in
+            *'>'|*'$'|*'%'|*'#'|*'> '*|*'$ '*|*'% '*|*'# '*) false ;;
+            *) true ;;
+          esac; then
       FM_COMPOSER_SELECTED_KIND=
       return 1
     fi
