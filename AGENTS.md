@@ -488,6 +488,7 @@ Re-evaluate queued work after every teardown and heartbeat, dispatching items on
 `.tasks.toml`, `docs/configuration.md`, and current `tasks-axi --help` own the backlog schema, compatibility, retention, and routine command syntax.
 Use compatible `tasks-axi` when the configured backend selects it and the documented manual path otherwise; keep only the configured recent Done entries.
 `secondmate-provisioning` and `bin/fm-backlog-handoff.sh` own cross-home handoff safety.
+`bin/fm-harbor.sh` serves the captain a read-only, auto-refreshing browser view of this backlog on loopback; its `--help` owns start/stop/status usage.
 
 Keep free-form notes free of temporary paths, moving versions, ephemeral identifiers, and copied state that will rot.
 Inspect the current task note before replacing its considered body, and archive the superseded body when recoverability matters rather than appending by default.
