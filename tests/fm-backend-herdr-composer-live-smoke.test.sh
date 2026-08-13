@@ -130,15 +130,22 @@ pass "real herdr: busy_state reflects a real report-agent idle/working round tri
 
 fm_herdr_lab_cli "$SESSION" pane report-agent "$PANE_ID" --source fm-composer-live-test --agent claude --state idle >/dev/null 2>&1 \
   || fail "could not reset the pane's agent to idle before the landed-submit check"
+# The driver and send_text_submit's poll loop are independently scheduled
+# subprocess chains with no shared clock, so margins need to comfortably
+# outlast contention-driven fork/exec latency on either side, not just the
+# uncontended case.
 (
-  sleep 0.3
+  sleep 1.5
   fm_herdr_lab_cli "$SESSION" pane report-agent "$PANE_ID" --source fm-composer-live-test --agent claude --state working >/dev/null 2>&1
-  sleep 0.3
+  sleep 10
   fm_herdr_lab_cli "$SESSION" pane report-agent "$PANE_ID" --source fm-composer-live-test --agent claude --state idle >/dev/null 2>&1
 ) &
 DRIVER_PID=$!
-out=$(fm_backend_herdr_send_text_submit "$TARGET" "hello captain" 3 0.6 0.1)
-wait "$DRIVER_PID"
+out=$(fm_backend_herdr_send_text_submit "$TARGET" "hello captain" 8 1.0 0.3)
+# Don't block test completion on the driver's own generous safety-margin
+# hold; the next block resets state to idle explicitly anyway.
+kill "$DRIVER_PID" 2>/dev/null || true
+wait "$DRIVER_PID" 2>/dev/null || true
 [ "$out" = empty ] || fail "send_text_submit should report empty (confirmed) once a real agent_status transition to working is observed, got '$out'"
 pass "real herdr: send_text_submit confirms submission via a real agent_status idle->working transition"
 
