@@ -240,7 +240,7 @@ test_start_status_stop_and_singleton() {
   pass "start/status/stop lifecycle and the singleton guard behave correctly"
 }
 
-test_render_expands_truncated_titles_and_leaves_short_titles_plain() {
+test_render_shows_full_titles_as_plain_text() {
   local home f html in_flight
   home=$(hb_home long-titles)
   f="$home/data/backlog.md"
@@ -253,19 +253,19 @@ test_render_expands_truncated_titles_and_leaves_short_titles_plain() {
   assert_not_contains "$html" "truncated," \
     "the at-source truncation marker must never reach the rendered page"
   in_flight=$(hb_section "$html" '<h2>In flight</h2>' '<h2>Queued / blocked</h2>')
-  assert_contains "$in_flight" "<details><summary>" \
-    "a truncated title must render as a collapsed details/summary block"
+  assert_not_contains "$in_flight" "<details" \
+    "a truncated title must never render as a details/summary block"
+  assert_not_contains "$in_flight" "<summary" \
+    "a truncated title must never render as a details/summary block"
   assert_contains "$in_flight" "$long" \
-    "the expanded details block must carry the complete full title"
+    "the full title must render in full as plain text"
   assert_contains "$in_flight" "\">Short title <span" \
-    "a short title must render as plain text, not a details block"
-  assert_not_contains "$in_flight" "<details><summary>Short title" \
-    "a short title must not get a pointless disclosure widget"
+    "a short title must render as plain text"
 
-  pass "long titles expand fully in a details block while short titles stay plain"
+  pass "long and short titles both render in full as plain text"
 }
 
-test_render_escapes_html_in_expanded_full_title() {
+test_render_escapes_html_in_full_title() {
   local home f html in_flight
   home=$(hb_home long-title-escaping)
   f="$home/data/backlog.md"
@@ -278,16 +278,16 @@ test_render_escapes_html_in_expanded_full_title() {
     "an unescaped script tag from a full title must never reach the page"
   in_flight=$(hb_section "$html" '<h2>In flight</h2>' '<h2>Queued / blocked</h2>')
   assert_contains "$in_flight" "&lt;script&gt;alert(1)&lt;/script&gt;" \
-    "the expanded full title must be HTML-escaped"
+    "the full title must be HTML-escaped"
 
-  pass "HTML-special characters in an expanded full title are escaped"
+  pass "HTML-special characters in a full title are escaped"
 }
 
 test_render_groups_by_captain_priority
 test_render_is_read_only
 test_render_handles_missing_backlog
-test_render_expands_truncated_titles_and_leaves_short_titles_plain
-test_render_escapes_html_in_expanded_full_title
+test_render_shows_full_titles_as_plain_text
+test_render_escapes_html_in_full_title
 test_loopback_only_and_no_extra_knobs
 test_serve_reflects_live_changes_with_no_restart
 test_start_status_stop_and_singleton

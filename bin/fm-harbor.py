@@ -40,7 +40,6 @@ DONE_TAIL = 8
 REFRESH_SECONDS = 30
 BIND = "127.0.0.1"  # never configurable: loopback-only is a hard safety rule.
 TRUNCATION_MARKER = "(truncated,"  # tasks-axi list's at-source title-truncation tag.
-SUMMARY_HEAD_LEN = 80
 
 
 class AxiError(Exception):
@@ -232,11 +231,7 @@ def _title_html(row, backlog_file, cache):
     raw_title = row.get("title", row.get("id", ""))
     if not _is_truncated(raw_title):
         return _esc(raw_title)
-    full_title = _resolved_title(row, backlog_file, cache)
-    head = full_title.splitlines()[0] if full_title else full_title
-    if len(head) > SUMMARY_HEAD_LEN:
-        head = head[:SUMMARY_HEAD_LEN].rstrip() + "…"
-    return f"<details><summary>{_esc(head)}</summary>{_esc(full_title)}</details>"
+    return _esc(_resolved_title(row, backlog_file, cache))
 
 
 def _task_card(row, notes, backlog_file, cache):
@@ -313,8 +308,6 @@ PAGE_STYLE = """
   .task { padding: 0.6rem 0; border-bottom: 1px solid #eee; }
   .task:last-child { border-bottom: none; }
   .title { font-weight: 600; }
-  .title summary { cursor: pointer; }
-  .title details { display: inline; }
   .id { font-weight: 400; font-family: ui-monospace, Menlo, monospace;
         font-size: 0.8rem; color: #888; white-space: nowrap; }
   .context { color: #666; font-size: 0.85rem; }
