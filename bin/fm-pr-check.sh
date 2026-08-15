@@ -7,9 +7,12 @@
 # including a merge request on a self-hosted GitLab instance.
 # fork-only: whenever the watcher's merge poll finds the PR still open, it also
 # runs bin/fm-pr-activity-poll.sh to surface new PR comments/reviews from
-# anyone since a durable per-task watermark (state/<id>.pr-activity-seen,
-# created lazily on that script's first run); see its own header for the full
-# contract. This script does not touch the watermark itself.
+# anyone since a durable per-task watermark (state/<id>.pr-activity-seen); see
+# its own header for the full contract. This script seeds that watermark once,
+# on a task's first arm, and never touches an existing one on a re-arm: a
+# GitHub PR created within FM_PR_ACTIVITY_YOUNG_PR_WINDOW_SECONDS below seeds
+# to its creation time so nothing posted before arming is missed; every other
+# case, including a GitLab merge request, seeds to "now".
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -77,12 +80,22 @@ fi
 # bin/fm-teardown.sh reads the head from the forge at teardown rather than from
 # metadata and falls back to its provider-agnostic content check, and
 # bin/fm-review-diff.sh resolves the head from the remote when none is recorded.
+#
+# createdAt is fetched the same GitHub-only way and for the same reason: plain
+# glab exposes an MR's creation time only inside JSON output too, so a GitLab
+# task's activity watermark always seeds to "now" below.
+FM_PR_ACTIVITY_YOUNG_PR_WINDOW_SECONDS=3600
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD=
+PR_CREATED_AT=
 if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
   if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
     && fm_pr_head_valid "$REMOTE_HEAD"; then
     PR_HEAD=$REMOTE_HEAD
+  fi
+  if REMOTE_CREATED_AT=$(cd "$WT" && gh pr view "$URL" --json createdAt -q .createdAt 2>/dev/null) \
+    && fm_pr_created_at_valid "$REMOTE_CREATED_AT"; then
+    PR_CREATED_AT=$REMOTE_CREATED_AT
   fi
 fi
 
@@ -140,6 +153,12 @@ fm_pr_poll_publish_prepared || {
   echo "error: could not publish PR poll" >&2
   exit 1
 }
+
+# Best-effort, and only on a first arm: see this script's header for the seed
+# contract. Runs after the poll is armed so a watermark write hiccup never
+# costs the merge watch.
+fm_pr_activity_watermark_arm "$STATE/$ID.pr-activity-seen" "$PR_CREATED_AT" \
+  "$FM_PR_ACTIVITY_YOUNG_PR_WINDOW_SECONDS"
 
 # Best-effort fleet-provenance label, every mode that opens a PR (no-mistakes,
 # direct-PR, fork-only) converges here once firstmate records pr=, so this is
