@@ -98,6 +98,71 @@ test_predicate_source_needs_supervision() {
   pass "fm_supervision_unhealthy: source-only home needs supervision"
 }
 
+# register_custom_check <state-dir> <id>: the real bin/fm-check-register.sh
+# flow (an executable check.sh plus its bin/fm-check-lib.sh trust record), the
+# same shape bin/fm-watch.sh requires before it will run a hand-written check.
+register_custom_check() {
+  local state=$1 id=$2
+  mkdir -p "$state"
+  cat > "$state/$id.check.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'ok\n'
+SH
+  chmod 0700 "$state/$id.check.sh"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" "$id" >/dev/null \
+    || fail "could not register test custom check $id"
+}
+
+test_predicate_armed_check_needs_supervision_with_zero_tasks() {
+  local state="$TMP_ROOT/pred-check/state"
+  register_custom_check "$state" sup-check
+  fm_supervision_unhealthy "$state" 300 || fail "an armed custom check with no beacon must be unhealthy"
+  [ "$FM_SUP_IN_FLIGHT" -eq 0 ] || fail "a standalone armed check must not count as an in-flight task"
+  [ "$FM_SUP_CHECKS" -eq 1 ] || fail "expected one armed custom check, got $FM_SUP_CHECKS"
+  [ "$FM_SUP_NEEDED" = true ] || fail "an armed custom check must set FM_SUP_NEEDED"
+  pass "fm_supervision_unhealthy: a home with only an armed custom check and zero tasks needs supervision"
+}
+
+test_predicate_unregistered_check_ignored() {
+  local state="$TMP_ROOT/pred-check-unregistered/state"
+  mkdir -p "$state"
+  cat > "$state/stray.check.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'ok\n'
+SH
+  chmod 0700 "$state/stray.check.sh"
+  fm_supervision_status "$state" 300
+  [ "$FM_SUP_CHECKS" -eq 0 ] || fail "an unregistered check.sh (no check-trust record) must not count as armed"
+  [ "$FM_SUP_NEEDED" = false ] || fail "an unregistered check.sh must not require supervision on its own"
+  pass "fm_supervision_status: an unregistered check.sh is ignored, not counted as armed"
+}
+
+test_predicate_trust_failed_check_ignored() {
+  local state="$TMP_ROOT/pred-check-tampered/state"
+  register_custom_check "$state" tampered-check
+  # Tamper with the check bytes after registration: the trust record's stored
+  # hash no longer matches, mirroring bin/fm-watch.sh's own quarantine case.
+  cat > "$state/tampered-check.check.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'tampered\n'
+SH
+  chmod 0700 "$state/tampered-check.check.sh"
+  fm_supervision_status "$state" 300
+  [ "$FM_SUP_CHECKS" -eq 0 ] || fail "a trust-failed (tampered) check.sh must not count as armed"
+  [ "$FM_SUP_NEEDED" = false ] || fail "a trust-failed check.sh must not require supervision on its own"
+  pass "fm_supervision_status: a trust-failed check.sh is ignored, not counted as armed"
+}
+
+test_predicate_x_watch_not_double_counted_as_check() {
+  local state="$TMP_ROOT/pred-check-xwatch/state"
+  mkdir -p "$state"
+  : > "$state/x-watch.check.sh"
+  fm_supervision_status "$state" 300
+  [ "$FM_SUP_CHECKS" -eq 0 ] || fail "the X-mode relay poll shim must stay owned by its own existing source, not FM_SUP_CHECKS"
+  [ "$FM_SUP_NEEDED" = true ] || fail "the X-mode relay poll must still register as supervision need"
+  pass "fm_supervision_status: x-watch.check.sh is excluded from FM_SUP_CHECKS (already its own source)"
+}
+
 # --- HOOK: bin/fm-turnend-guard.sh ------------------------------------------
 #
 # Each scenario gets its own directory carrying a copy of the two guard scripts
@@ -114,6 +179,8 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-harness.sh" "$dir/bin/fm-harness.sh"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
+  cp "$ROOT/bin/fm-pr-lib.sh" "$dir/bin/fm-pr-lib.sh"
+  cp "$ROOT/bin/fm-check-lib.sh" "$dir/bin/fm-check-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
   mkdir -p "$dir/docs"
@@ -248,6 +315,35 @@ test_hook_blocks_source_only_home() {
   expect_code 2 "$status" "non-Claude hook must block when a source-only home has no watcher"
   assert_contains "$out" "1 process-event source(s) registered" "block reason must identify the source-only supervision need"
   pass "fm-turnend-guard: non-Claude path blocks a source-only home"
+}
+
+# The 2026-08-15 hass-home incident regression: a home with only an armed
+# custom check (no in-flight task, no source, no relay poll) must still block
+# a blind turn end, and the banner must name the check rather than falling
+# through to the X-mode wording.
+test_hook_blocks_check_only_home() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-check-only")
+  register_custom_check "$dir/state" sup-check
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "non-Claude hook must block when a check-only home has no watcher"
+  assert_contains "$out" "1 armed custom check(s) registered" "block reason must identify the check-only supervision need"
+  pass "fm-turnend-guard: non-Claude path blocks a check-only home (armed custom check, zero tasks)"
+}
+
+test_hook_silent_with_quarantined_check_only() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-check-quarantined")
+  mkdir -p "$dir/state"
+  cat > "$dir/state/stray.check.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'ok\n'
+SH
+  chmod 0700 "$dir/state/stray.check.sh"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 0 "$status" "an unregistered check.sh must not require supervision"
+  [ -z "$out" ] || fail "hook produced output for an unregistered (quarantined) check.sh: $out"
+  pass "fm-turnend-guard: silent no-op with only an unregistered/quarantined check.sh"
 }
 
 test_hook_blocks_when_dead_lock_has_fresh_beacon() {
@@ -1608,9 +1704,15 @@ test_predicate_healthy_fresh_beacon
 test_predicate_queue_pending_flag
 test_predicate_x_mode_needs_supervision
 test_predicate_source_needs_supervision
+test_predicate_armed_check_needs_supervision_with_zero_tasks
+test_predicate_unregistered_check_ignored
+test_predicate_trust_failed_check_ignored
+test_predicate_x_watch_not_double_counted_as_check
 test_hook_silent_when_no_work_in_flight
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_source_only_home
+test_hook_blocks_check_only_home
+test_hook_silent_with_quarantined_check_only
 test_hook_blocks_when_dead_lock_has_fresh_beacon
 test_hook_silent_with_live_lock_and_fresh_beacon
 test_hook_non_claude_health_ignores_claude_budget_contention
