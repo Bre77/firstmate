@@ -11,10 +11,16 @@
 # This is deliberately generic: no special-casing of captains or PR authors.
 #
 # Watermark: state/<id>.pr-activity-seen holds the newest-seen item's UTC ISO
-# 8601 timestamp. fm-pr-check.sh creates it set to "now" the first time a task
-# arms, so a freshly-armed check never floods the wake with the PR's pre-arm
-# history. This script also creates it (and exits silently) if it ever finds
-# the file missing, as a defensive fallback with the same no-flood behavior.
+# 8601 timestamp. fm-pr-check.sh seeds it once, the first time a task arms,
+# and never touches an already-present watermark on a re-arm: a young GitHub
+# PR seeds to just before its own creation time, so the first poll surfaces
+# everything posted since it opened, while an older PR (or one whose creation
+# time is unavailable, including every GitLab merge request) seeds to "now" so
+# a freshly-armed check on aged history never floods the wake - see
+# fm-pr-check.sh's header for the exact age threshold. This script also
+# creates the watermark (and exits silently) if it ever finds the file missing
+# mid-life, seeded to "now" regardless of PR age, as a defensive fallback that
+# never re-derives a creation time.
 # Each poll advances the watermark to the newest timestamp it actually
 # surfaced; a poll that finds nothing new leaves it untouched.
 #

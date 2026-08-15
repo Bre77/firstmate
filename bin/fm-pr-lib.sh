@@ -215,6 +215,71 @@ fm_pr_head_valid() {
   [[ "$head" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
 }
 
+fm_pr_created_at_valid() {
+  local created_at=${1-}
+  local LC_ALL=C
+  [[ "$created_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
+}
+
+# Convert a UTC ISO 8601 timestamp to Unix epoch seconds, or print nothing on
+# failure. Tries the BSD/macOS `date` spelling first, then the GNU spelling.
+fm_pr_epoch_from_iso8601() {
+  local iso=${1-} epoch
+  epoch=$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$iso" +%s 2>/dev/null \
+    || date -u -d "$iso" +%s 2>/dev/null) || return 1
+  case "$epoch" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s' "$epoch"
+}
+
+# Convert Unix epoch seconds back to a UTC ISO 8601 timestamp, trying the
+# BSD/macOS spelling first, then the GNU spelling.
+fm_pr_iso8601_from_epoch() {
+  local epoch=$1
+  date -u -r "$epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+    || date -u -d "@$epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null
+}
+
+# The activity watermark value to seed on a task's first arm. A PR whose
+# creation time is known and within the given young-PR window (seconds) seeds
+# to one second before it was created, so the first poll surfaces everything
+# posted since the PR opened rather than missing a bot review that lands
+# before CI - and therefore arming - finishes. Every other case (creation time
+# unknown, unparsable, in the future, or older than the window) seeds to
+# "now", the no-flood default for a PR armed mid-life.
+fm_pr_activity_watermark_seed_value() {
+  local created_at=${1-} window=${2-} now created_epoch now_epoch age seed_epoch seed
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  if [ -n "$created_at" ] && fm_pr_created_at_valid "$created_at" \
+    && created_epoch=$(fm_pr_epoch_from_iso8601 "$created_at"); then
+    now_epoch=$(date +%s)
+    age=$((now_epoch - created_epoch))
+    if [ "$age" -ge 0 ] && [ "$age" -le "$window" ]; then
+      seed_epoch=$((created_epoch - 1))
+      seed=$(fm_pr_iso8601_from_epoch "$seed_epoch")
+      if [ -n "$seed" ]; then
+        printf '%s' "$seed"
+        return 0
+      fi
+    fi
+  fi
+  printf '%s' "$now"
+}
+
+# Seed a task's activity watermark file on its first arm only; a re-arm must
+# never touch an already-present watermark, so an active watch's progress
+# stays exactly where it was. Best-effort: a write failure is silently
+# ignored, matching the poll script's own lazy fallback, because losing this
+# seed only costs one extra "now" reseed on the task's next poll.
+fm_pr_activity_watermark_arm() {
+  local file=$1 created_at=$2 window=$3 seed
+  [ -f "$file" ] && return 0
+  seed=$(fm_pr_activity_watermark_seed_value "$created_at" "$window")
+  printf '%s\n' "$seed" > "$file" 2>/dev/null
+  return 0
+}
+
 fm_pr_file_mode() {
   if [ "$(uname)" = Darwin ]; then
     stat -f %Lp "$1" 2>/dev/null

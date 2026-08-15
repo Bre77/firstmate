@@ -4,13 +4,12 @@
 # this script in production: whenever fm-pr-poll.sh's static merge check finds
 # a tracked PR still open, the watcher additionally runs the activity poll to
 # surface new issue comments, inline review comments, and review summaries
-# from anyone, as a check: wake. fm-pr-check.sh itself never touches the
-# activity watermark; it only arms the byte-static merge poll
-# (tests/fm-pr-check-security.test.sh owns that mechanism).
+# from anyone, as a check: wake. fm-pr-check.sh seeds the activity watermark
+# once, on a task's first arm, and never touches an existing one on a re-arm
+# (tests/fm-pr-check-security.test.sh owns the merge-poll arming mechanism).
 #
 # Matrix:
-#   (a) re-arming an existing task never resets its activity watermark, since
-#       fm-pr-check.sh does not manage it at all
+#   (a) re-arming an existing task never resets its activity watermark
 #   (b) the activity-poll script defensively initializes a missing watermark
 #       and stays silent on that first run (no pre-arm history flood)
 #   (c) a direct poll surfaces new items across all three kinds (comment,
@@ -31,6 +30,11 @@
 #       lags a self/crew reply that advanced the general watermark past it
 #   (i) a first-sighted bot review seeds the cursor silently, matching the
 #       general watermark's own no-flood behavior on arm
+#   (j) arming a task for a PR created minutes ago seeds the watermark to just
+#       before its creation, so the first poll surfaces a comment posted
+#       before arming (the Copilot-review arm-window blind spot)
+#   (k) arming a task for a PR created well outside the young-PR window seeds
+#       the watermark to "now", so its pre-arm history stays silent
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -56,9 +60,25 @@ make_case() {
   printf '%s\n' "$case_dir"
 }
 
+# Like make_case, but records a worktree= line and creates that directory: the
+# createdAt (and headRefOid) fetch in fm-pr-check.sh only runs when a task
+# meta has a live worktree, so the arm-time watermark seeding tests need one.
+make_case_with_worktree() {
+  local name=$1 case_dir
+  case_dir=$(make_case "$name")
+  mkdir -p "$case_dir/wt"
+  fm_write_meta "$case_dir/home/state/task-x.meta" \
+    "window=fm-task-x" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "worktree=$case_dir/wt"
+  printf '%s\n' "$case_dir"
+}
+
 # write_gh_mock <fakebin>: a `gh` stub covering both call shapes the merge
-# check and the activity poll need - `pr view ... --json state|headRefOid`
-# for merge detection, and `api <path> ... -q <expr>` for activity polling.
+# check and the activity poll need - `pr view ... --json state|headRefOid|
+# createdAt` for merge detection and arm-time seeding, and
+# `api <path> ... -q <expr>` for activity polling.
 # Also covers `label create` and `pr edit --add-label`, the labelling calls
 # fm_pr_apply_label makes: FM_TEST_LABEL_CREATE_FAIL=1 and
 # FM_TEST_PR_EDIT_FAIL=1 make each fail independently, to exercise graceful
@@ -67,9 +87,10 @@ make_case() {
 # executing the actual jq expression the script under test built - not a
 # canned response - so a bug in that expression fails the test instead of
 # hiding behind a dumb mock. FM_TEST_PR_STATE (default OPEN), FM_TEST_PR_HEAD,
-# FM_TEST_FIXTURE_ISSUE_COMMENTS, FM_TEST_FIXTURE_REVIEW_COMMENTS,
-# FM_TEST_FIXTURE_REVIEWS, and FM_TEST_GH_API_FAIL=1 (simulate a non-2xx
-# response whose error body still lands on stdout) are read at call time.
+# FM_TEST_PR_CREATED_AT, FM_TEST_FIXTURE_ISSUE_COMMENTS,
+# FM_TEST_FIXTURE_REVIEW_COMMENTS, FM_TEST_FIXTURE_REVIEWS, and
+# FM_TEST_GH_API_FAIL=1 (simulate a non-2xx response whose error body still
+# lands on stdout) are read at call time.
 write_gh_mock() {
   local fakebin=$1
   cat > "$fakebin/gh" <<'SH'
@@ -79,6 +100,10 @@ if [ "${1:-}" = "pr" ] && [ "${2:-}" = "view" ]; then
   case " $* " in
     *'--json headRefOid'*)
       if [ -n "${FM_TEST_PR_HEAD:-}" ]; then printf '%s\n' "$FM_TEST_PR_HEAD"; exit 0; fi
+      exit 1
+      ;;
+    *'--json createdAt'*)
+      if [ -n "${FM_TEST_PR_CREATED_AT:-}" ]; then printf '%s\n' "$FM_TEST_PR_CREATED_AT"; exit 0; fi
       exit 1
       ;;
     *'--json state'*)
@@ -161,6 +186,14 @@ assert_iso8601() {
   grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' "$1" || fail "$2"
 }
 
+# epoch_to_iso <epoch>: UTC ISO 8601 timestamp for the given Unix epoch
+# seconds, tried the same BSD/macOS-then-GNU portable way bin/fm-pr-lib.sh
+# itself converts epochs, so a fixture's expected value matches byte-for-byte.
+epoch_to_iso() {
+  date -u -r "$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+    || date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null
+}
+
 test_rearm_does_not_touch_watermark() {
   local case_dir url
   case_dir=$(make_case rearm-preserve)
@@ -172,8 +205,82 @@ test_rearm_does_not_touch_watermark() {
     || fail "rearm-preserve: fm-pr-check.sh should succeed"
 
   assert_grep '2020-05-05T05:05:05Z' "$case_dir/home/state/task-x.pr-activity-seen" \
-    "rearm-preserve: fm-pr-check.sh must never touch the activity watermark"
-  pass "fm-pr-check.sh never touches the activity watermark, on first arm or re-arm"
+    "rearm-preserve: fm-pr-check.sh must never touch an existing activity watermark"
+  pass "fm-pr-check.sh never resets an already-present activity watermark on a re-arm"
+}
+
+# test_young_pr_arm_seeds_watermark_to_creation: a PR created minutes ago is
+# within the young-PR window, so arming seeds the watermark to one second
+# before its creation - the fix for the arm-window blind spot where a bot
+# review posted between PR creation and CI-gated arming was silently
+# classified as pre-arm history and never surfaced.
+test_young_pr_arm_seeds_watermark_to_creation() {
+  local case_dir url now_epoch created_at expected_seed seeded out
+  case_dir=$(make_case_with_worktree young-pr-arm)
+  write_gh_mock "$case_dir/fakebin"
+  url="https://github.com/example/repo/pull/201"
+  now_epoch=$(date +%s)
+  created_at=$(epoch_to_iso $((now_epoch - 300)))
+  expected_seed=$(epoch_to_iso $((now_epoch - 301)))
+
+  FM_TEST_PR_CREATED_AT="$created_at" run_pr_check "$case_dir" task-x "$url" > /dev/null 2>&1 \
+    || fail "young-pr-arm: fm-pr-check.sh should succeed"
+
+  assert_present "$case_dir/home/state/task-x.pr-activity-seen" \
+    "young-pr-arm: arming a young PR must seed the activity watermark"
+  seeded=$(cat "$case_dir/home/state/task-x.pr-activity-seen")
+  [ "$seeded" = "$expected_seed" ] \
+    || fail "young-pr-arm: watermark must seed to one second before creation (got $seeded, want $expected_seed)"
+
+  cat > "$case_dir/fixtures/issue-comments.json" <<JSON
+[{"created_at":"$created_at","user":{"login":"github-copilot"},"body":"a bot review posted right after the PR opened, before CI-gated arming"}]
+JSON
+  printf '[]' > "$case_dir/fixtures/review-comments.json"
+  printf '[]' > "$case_dir/fixtures/reviews.json"
+
+  out=$(FM_TEST_FIXTURE_ISSUE_COMMENTS="$case_dir/fixtures/issue-comments.json" \
+        FM_TEST_FIXTURE_REVIEW_COMMENTS="$case_dir/fixtures/review-comments.json" \
+        FM_TEST_FIXTURE_REVIEWS="$case_dir/fixtures/reviews.json" \
+        run_activity_poll_directly "$case_dir" task-x "$url")
+
+  assert_contains "$out" "pr-comment task-x github-copilot (comment): a bot review posted right after the PR opened, before CI-gated arming" \
+    "young-pr-arm: the first poll after arming must surface a comment posted before arming closed the blind spot"
+  pass "arming a young PR seeds the watermark to just before its creation, so the first poll surfaces pre-arm activity"
+}
+
+# test_old_pr_arm_seeds_watermark_to_now: a PR created well outside the
+# young-PR window (armed mid-life, re-arm, or a recycled task) keeps the
+# original "now" seeding, so its aged pre-arm history stays silent.
+test_old_pr_arm_seeds_watermark_to_now() {
+  local case_dir url created_at out
+  case_dir=$(make_case_with_worktree old-pr-arm)
+  write_gh_mock "$case_dir/fakebin"
+  url="https://github.com/example/repo/pull/202"
+  created_at=$(epoch_to_iso $(( $(date +%s) - 7200 )))
+
+  FM_TEST_PR_CREATED_AT="$created_at" run_pr_check "$case_dir" task-x "$url" > /dev/null 2>&1 \
+    || fail "old-pr-arm: fm-pr-check.sh should succeed"
+
+  assert_present "$case_dir/home/state/task-x.pr-activity-seen" \
+    "old-pr-arm: arming an old PR must still seed the activity watermark"
+  assert_iso8601 "$case_dir/home/state/task-x.pr-activity-seen" \
+    "old-pr-arm: the seeded watermark must look like a UTC ISO 8601 timestamp"
+  assert_no_grep "$created_at" "$case_dir/home/state/task-x.pr-activity-seen" \
+    "old-pr-arm: the watermark must not seed to the PR's old creation time"
+
+  cat > "$case_dir/fixtures/issue-comments.json" <<JSON
+[{"created_at":"$created_at","user":{"login":"someone"},"body":"pre-arm history on an aged PR, must not appear"}]
+JSON
+  printf '[]' > "$case_dir/fixtures/review-comments.json"
+  printf '[]' > "$case_dir/fixtures/reviews.json"
+
+  out=$(FM_TEST_FIXTURE_ISSUE_COMMENTS="$case_dir/fixtures/issue-comments.json" \
+        FM_TEST_FIXTURE_REVIEW_COMMENTS="$case_dir/fixtures/review-comments.json" \
+        FM_TEST_FIXTURE_REVIEWS="$case_dir/fixtures/reviews.json" \
+        run_activity_poll_directly "$case_dir" task-x "$url")
+
+  [ -z "$out" ] || fail "old-pr-arm: pre-arm history on an aged PR must stay silent (got: $out)"
+  pass "arming an old PR keeps seeding the watermark to \"now\", so its pre-arm history stays silent"
 }
 
 test_defensive_missing_watermark_initializes_silently() {
@@ -486,6 +593,8 @@ SH
 }
 
 test_rearm_does_not_touch_watermark
+test_young_pr_arm_seeds_watermark_to_creation
+test_old_pr_arm_seeds_watermark_to_now
 test_defensive_missing_watermark_initializes_silently
 test_poll_surfaces_new_activity_and_advances_watermark
 test_wake_line_truncates_long_body
