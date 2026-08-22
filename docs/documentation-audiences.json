@@ -133,6 +133,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/captain-hold-lifecycle/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/captain-msg-response/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -197,6 +201,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".greptile/rules.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "AGENTS.md",
       "audience": "agent-runtime"
     },
@@ -207,6 +215,10 @@
     {
       "path": "CONTRIBUTING.md",
       "audience": "maintainer-architecture"
+    },
+    {
+      "path": "GROK_BOT.md",
+      "audience": "public-product"
     },
     {
       "path": "README.md",
@@ -241,6 +253,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/captain-hold-lifecycle.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/captain-messaging.md",
       "audience": "operator-current"
     },
@@ -269,10 +285,6 @@
       "audience": "maintainer-verification"
     },
     {
-      "path": "docs/decision-hold-lifecycle.md",
-      "audience": "maintainer-architecture"
-    },
-    {
       "path": "docs/documentation-audiences.md",
       "audience": "maintainer-architecture"
     },
@@ -290,6 +302,10 @@
     },
     {
       "path": "docs/examples/crew-dispatch.json",
+      "audience": "operator-example"
+    },
+    {
+      "path": "docs/examples/watched-tools.json",
       "audience": "operator-example"
     },
     {
@@ -407,6 +423,10 @@
     {
       "path": "docs/verification/trace-context.md",
       "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/voice-relay.md",
+      "audience": "operator-current"
     },
     {
       "path": "docs/watcher-continuity.md",
