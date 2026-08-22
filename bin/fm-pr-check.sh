@@ -80,6 +80,8 @@ fi
 # bin/fm-teardown.sh reads the head from the forge at teardown rather than from
 # metadata and falls back to its provider-agnostic content check, and
 # bin/fm-review-diff.sh resolves the head from the remote when none is recorded.
+# bin/fm-pr-merge.sh reads a GitLab head live at merge time for the same reason,
+# and treats a recorded value that disagrees as stale rather than authoritative.
 #
 # createdAt is fetched the same GitHub-only way and for the same reason: plain
 # glab exposes an MR's creation time only inside JSON output too, so a GitLab
