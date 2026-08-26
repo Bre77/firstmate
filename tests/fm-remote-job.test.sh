@@ -19,6 +19,7 @@ REAL_GIT=$(command -v git)
 OTHER_PID=
 RECOVERY_WORKER_PID=
 REPEAT_WORKER_PID=
+HOTLOOP_WORKER_PID=
 mkdir -p "$REMOTE_ROOT/bin" "$REMOTE_HOME" "$ACCOUNT_HOME" "$RUNTIME_BIN"
 # worker.pid records the serving child, not its restart supervisor, so stopping
 # that pid alone leaves the supervisor to respawn - the leak
@@ -27,6 +28,7 @@ cleanup_remote_job_fixture() {
   [ -z "$OTHER_PID" ] || kill "$OTHER_PID" 2>/dev/null || true
   [ -z "$RECOVERY_WORKER_PID" ] || kill "$RECOVERY_WORKER_PID" 2>/dev/null || true
   [ -z "$REPEAT_WORKER_PID" ] || kill "$REPEAT_WORKER_PID" 2>/dev/null || true
+  [ -z "$HOTLOOP_WORKER_PID" ] || kill "$HOTLOOP_WORKER_PID" 2>/dev/null || true
   if [ -f "$STATE_ROOT/worker.pid" ]; then
     fm_remote_job_stop_worker_tree "$(cat "$STATE_ROOT/worker.pid")" || true
   fi
@@ -690,5 +692,57 @@ kill -TERM "$REPEAT_WORKER_PID"
 wait "$REPEAT_WORKER_PID" 2>/dev/null || true
 REPEAT_WORKER_PID=
 pass "a repeatedly signalled shutdown still releases ownership for the next worker"
+
+# The idle poll loop must not rewrite its readiness heartbeat or scan for
+# reapable jobs faster than either task actually needs: a heartbeat only needs
+# fm_remote_job_probe's 10-second freshness tolerance, and a completed job
+# only becomes reap-eligible after FM_REMOTE_JOB_REAP_SECONDS. A regression
+# here shows up as real chmod/mv process spawns at the job-poll tick rate, so
+# count actual invocations instead of reading the source.
+HOTLOOP_HOME="$TMP_ROOT/hotloop-account"
+HOTLOOP_STATE="$TMP_ROOT/hotloop-jobs"
+HOTLOOP_FAKEBIN="$TMP_ROOT/hotloop-fakebin"
+HOTLOOP_LOG="$TMP_ROOT/hotloop-calls.log"
+mkdir -p "$HOTLOOP_HOME" "$HOTLOOP_FAKEBIN"
+chmod 700 "$HOTLOOP_HOME"
+HOTLOOP_REAL_CHMOD=$(command -v chmod)
+HOTLOOP_REAL_MV=$(command -v mv)
+: > "$HOTLOOP_LOG"
+cat > "$HOTLOOP_FAKEBIN/chmod" <<SH
+#!/bin/bash
+printf 'chmod\n' >> "$HOTLOOP_LOG"
+exec "$HOTLOOP_REAL_CHMOD" "\$@"
+SH
+cat > "$HOTLOOP_FAKEBIN/mv" <<SH
+#!/bin/bash
+printf 'mv\n' >> "$HOTLOOP_LOG"
+exec "$HOTLOOP_REAL_MV" "\$@"
+SH
+chmod 700 "$HOTLOOP_FAKEBIN/chmod" "$HOTLOOP_FAKEBIN/mv"
+HOME="$HOTLOOP_HOME" PATH="$HOTLOOP_FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
+  FM_REMOTE_JOB_STATE_ROOT="$HOTLOOP_STATE" FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
+  "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" --serve \
+  > "$TMP_ROOT/hotloop.out" 2> "$TMP_ROOT/hotloop.err" &
+HOTLOOP_WORKER_PID=$!
+for _ in $(seq 1 300); do
+  [ -f "$HOTLOOP_STATE/worker.ready" ] && break
+  sleep 0.05
+done
+assert_present "$HOTLOOP_STATE/worker.ready" "the idle-loop fixture worker did not become ready"
+: > "$HOTLOOP_LOG"
+sleep 3
+kill -TERM "$HOTLOOP_WORKER_PID"
+wait "$HOTLOOP_WORKER_PID" 2>/dev/null || true
+HOTLOOP_WORKER_PID=
+HOTLOOP_CHMOD=$(grep -c '^chmod$' "$HOTLOOP_LOG" || true)
+HOTLOOP_MV=$(grep -c '^mv$' "$HOTLOOP_LOG" || true)
+# A healthy idle worker writes roughly one heartbeat a second (~3 in this
+# window); the pre-fix loop wrote dozens per second from an unthrottled
+# heartbeat plus a reap scan re-run on every 0.05s poll tick.
+[ "$HOTLOOP_CHMOD" -le 15 ] \
+  || fail "idle worker spawned $HOTLOOP_CHMOD chmod calls in 3s - it is busy-looping its heartbeat/reap bookkeeping"
+[ "$HOTLOOP_MV" -le 15 ] \
+  || fail "idle worker spawned $HOTLOOP_MV mv calls in 3s - it is busy-looping its heartbeat/reap bookkeeping"
+pass "an idle worker does not busy-loop its heartbeat or reap-scan bookkeeping"
 
 echo "ALL TESTS PASSED"

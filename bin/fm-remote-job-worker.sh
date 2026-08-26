@@ -40,6 +40,16 @@ FM_REMOTE_JOB_ORPHAN_GRACE_SECONDS=$(worker_bounded_setting "${FM_REMOTE_JOB_ORP
 FM_REMOTE_JOB_SUPERVISOR_MAX_RESTARTS=$(worker_bounded_setting "${FM_REMOTE_JOB_SUPERVISOR_MAX_RESTARTS:-}" 20)
 FM_REMOTE_JOB_SUPERVISOR_MAX_BACKOFF_SECONDS=$(worker_bounded_setting "${FM_REMOTE_JOB_SUPERVISOR_MAX_BACKOFF_SECONDS:-}" 5)
 FM_REMOTE_JOB_SUPERVISOR_HEALTHY_SECONDS=$(worker_bounded_setting "${FM_REMOTE_JOB_SUPERVISOR_HEALTHY_SECONDS:-}" 10)
+# fm_remote_job_probe only requires this file's mtime within 10 seconds, so
+# rewriting it on every FM_REMOTE_JOB_POLL_SECONDS tick (as fast as 0.05s) is
+# pure waste while idle; this throttles the idle-loop heartbeat write to the
+# same 1-second cadence worker_run_with_timeout already uses during a job.
+FM_REMOTE_JOB_HEARTBEAT_SECONDS=$(worker_bounded_setting "${FM_REMOTE_JOB_HEARTBEAT_SECONDS:-}" 1)
+# A done job only becomes reap-eligible after FM_REMOTE_JOB_REAP_SECONDS
+# (default 3600), so scanning for one every FM_REMOTE_JOB_POLL_SECONDS tick
+# gains nothing but re-running fm_remote_job_prepare_state's unconditional
+# state-directory chmod calls at that same tick rate.
+FM_REMOTE_JOB_REAP_SCAN_SECONDS=$(worker_bounded_setting "${FM_REMOTE_JOB_REAP_SCAN_SECONDS:-}" 60)
 
 SCRIPT_DIR=$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 FM_ROOT=${FM_ROOT_OVERRIDE:-$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)}
@@ -677,7 +687,7 @@ worker_process_once() { # <account-home>
 }
 
 main() {
-  local account_home lock_status
+  local account_home lock_status next_heartbeat next_reap
   account_home=$(worker_account_home) || { worker_error "cannot resolve account home"; exit 1; }
   FM_ROOT=$(fm_remote_job_canonical_existing_dir "$FM_ROOT") || { worker_error "configured FM_ROOT is unsafe"; exit 1; }
   [ -f "$FM_ROOT/AGENTS.md" ] && [ ! -L "$FM_ROOT/AGENTS.md" ] || { worker_error "FM_ROOT is not a Firstmate checkout"; exit 1; }
@@ -695,18 +705,23 @@ main() {
   trap worker_shutdown HUP INT TERM
   worker_publish_identity "$account_home" || { worker_error "cannot publish worker code identity"; exit 1; }
   worker_publish_pid || { worker_error "cannot publish worker pid"; exit 1; }
+  worker_write_heartbeat || { worker_error "cannot update worker heartbeat"; exit 1; }
+  next_heartbeat=$((SECONDS + FM_REMOTE_JOB_HEARTBEAT_SECONDS))
+  next_reap=$SECONDS
   while :; do
-    worker_write_heartbeat || { worker_error "cannot update worker heartbeat"; exit 1; }
-    # Checked right after a fresh heartbeat, so the grace window cannot make a
-    # still-healthy worker read as unready to a concurrent probe.
+    if [ "$SECONDS" -ge "$next_heartbeat" ]; then
+      worker_write_heartbeat || { worker_error "cannot update worker heartbeat"; exit 1; }
+      next_heartbeat=$((SECONDS + FM_REMOTE_JOB_HEARTBEAT_SECONDS))
+    fi
+    # Checked after ensuring a fresh heartbeat, so the grace window cannot make
+    # a still-healthy worker read as unready to a concurrent probe.
     if worker_code_root_abandoned; then
       worker_error "configured FM_ROOT $FM_ROOT no longer exists; stopping the abandoned worker"
       exit 0
     fi
-    worker_reap=0
-    if [ "$worker_reap" -eq 0 ]; then
+    if [ "$SECONDS" -ge "$next_reap" ]; then
       fm_remote_job_reap_stale "$account_home" || true
-      worker_reap=1
+      next_reap=$((SECONDS + FM_REMOTE_JOB_REAP_SCAN_SECONDS))
     fi
     worker_process_once "$account_home"
     sleep "$FM_REMOTE_JOB_POLL_SECONDS"
