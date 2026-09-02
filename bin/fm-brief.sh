@@ -514,7 +514,7 @@ The task is complete only when committed on your branch \`fm/$ID\`.
 When it is implemented and committed, deliver it with:
 \`$FM_ROOT/bin/fm-fork-deliver.sh --title "<pr title>" --body-file <path>\`
 That runs a local quality gate, pushes your branch to the fork, and opens a PR into the fork main branch.
-The fork PR then runs its own checks (lint, portable behavior-test suites, stock-macOS-Bash snapshot compatibility); a red check blocks folding.
+The fork's own CI is skipped on this repo; the local gate the delivery command just ran is the testing enforcement.
 Append \`done: PR {url}\` with the URL it prints and stop.
 The captain reviews and firstmate folds the fork PR; do not merge it yourself.
 EOF

@@ -10,7 +10,7 @@ This note explains when to use fork-only delivery, why the default no-mistakes p
 | --- | --- | --- |
 | Intended home | `kunchenguid/firstmate:main` (shared with every user) | `Bre77/firstmate:main` (this fork only) |
 | Use for | Anything generalizable to every firstmate user | Changes that only make sense for this fork and are never upstreamed |
-| Validation | The no-mistakes pipeline (review, test, lint, CI) | The local quality gate (`bin/fm-fork-deliver.sh`) before delivery, plus the fork's own PR checks after |
+| Validation | The no-mistakes pipeline (review, test, lint, CI) | The local quality gate (`bin/fm-fork-deliver.sh`) before delivery; CI is skipped on the fork (see below) |
 | PR base | `kunchenguid/firstmate:main` | `Bre77/firstmate:main` |
 | Landing | Captain merges the upstream PR | Firstmate folds the fork PR |
 | Scaffold | `bin/fm-brief.sh <id> <repo>` (registered mode) | `bin/fm-brief.sh <id> <repo> --fork-only` |
@@ -60,8 +60,10 @@ Until that second clone exists, treat an upstream-generalizable change discovere
 
 Keep the default gate in sync with that workflow.
 Pass `--check '<command>'` to substitute a different gate for a non-firstmate repo, or `--skip-validate` when validation was already run separately.
-Once the branch is pushed, the fork's own `.github/workflows/ci.yml` runs the real PR checks: the lint job, the portable behavior-test suites, and the stock-macOS-Bash snapshot compatibility check.
-A red check on the fork PR blocks folding the same as it would on an upstream PR.
+
+Every job in `.github/workflows/ci.yml` carries an `if: github.repository == 'kunchenguid/firstmate'` guard (the same pattern `.github/workflows/no-mistakes-required.yml` already used), so those checks do not run on a fork PR and do not spend GitHub-runner time on shards and snapshot lanes that fork PRs do not need.
+The local gate above is therefore the sole testing enforcement for fork-only delivery: it runs by default and refuses to push or open a PR when it fails, so skipping it takes an explicit `--skip-validate`.
+If a fork later adds branch protection that requires named status checks, those checks will never report because the jobs that produced them are guarded off; drop the check requirements from that branch's protection rule instead of removing the guard.
 
 ## Running it
 

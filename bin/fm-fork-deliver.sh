@@ -18,9 +18,9 @@
 # This script runs a LOCAL gate before pushing, mirroring .github/workflows/ci.yml
 # (the lint + behavior tests jobs): shellcheck the shell scripts, then run each
 # tests/*.test.sh. Keep it in sync with that workflow; pass --check to substitute
-# a different gate. The fork's own PR checks (lint, portable behavior-test
-# suites, stock-macOS-Bash snapshot compatibility) still run after the push and
-# must go green before the PR can be folded.
+# a different gate. .github/workflows/ci.yml guards every job to the upstream
+# repo, so this local gate is the ONLY testing enforcement on a fork PR; only
+# --skip-validate bypasses it, and only when validation already ran separately.
 #
 # Operates on the current working directory's git worktree. Refuses to deliver
 # from a detached HEAD or from the fork's default branch, so only a feature
