@@ -114,6 +114,10 @@ export FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux
 export FM_REMOTE_JOB_QUEUE_TIMEOUT=60
 export FM_REMOTE_JOB_TIMEOUT=30
 export FM_REMOTE_JOB_STAGE_REAP_SECONDS=1
+# The worker's periodic stale-stage sweep defaults to a 60s scan interval
+# (FM_REMOTE_JOB_REAP_SCAN_SECONDS), which the stage-litter assertion below
+# cannot reliably observe inside its bounded poll window; force it fast here.
+export FM_REMOTE_JOB_REAP_SCAN_SECONDS=1
 # shellcheck source=bin/fm-remote-job-lib.sh
 . "$ROOT/bin/fm-remote-job-lib.sh"
 
