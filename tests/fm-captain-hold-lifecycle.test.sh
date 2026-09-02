@@ -90,7 +90,8 @@ write_origin_meta() {  # <home> <id> [kind]
     "project=$home/projects/sample" \
     "harness=codex" \
     "kind=$kind" \
-    "mode=$kind"
+    "mode=$kind" \
+    "spawn_gen=fixture-$id"
 }
 
 # Reproduces the loss exactly with privacy-safe synthetic names: the investigation
@@ -187,8 +188,7 @@ EOF
 
   FM_STATE_OVERRIDE="$home/state" bash -c '
     . "$1"
-    sig=$(fm_wake_signal_sig "$3") || exit 1
-    printf "%s" "$sig" > "$(fm_wake_signal_seen_path "$2" "$3")"
+    fm_wake_status_mark_current "$2" "$3"
   ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$home/state/$id.status" \
     || fail "could not prime the announced decision baseline"
   run_captain "$home" complete "$id" sample-route-call >/dev/null \
@@ -984,7 +984,10 @@ SH
     FM_SEND_LOG="$home/send.log" FM_SEND_SETTLE=0 \
     "$ROOT/bin/fm-send.sh" "$id" --resolve-key chat-choice "go with option A" >/dev/null 2>&1 \
     || fail "an answer to a transferred legacy decision was refused by the chat channel"
-  assert_contains "$(cat "$home/send.log")" "go with option A" "the answer text never reached the worker"
+  # The answer rides fm-send's durable inbox plane: the record carries the
+  # text while the typed channel carries only the doorbell.
+  grep -qF "go with option A" "$home/state/$id.inbox/001.msg" \
+    || fail "the answer text never reached the worker's durable inbox record"
   show=$(tasks_in "$home" show "$id-decision-chat-choice" --full)
   assert_contains "$show" "state: done" "a chat answer left the legacy row open"
   assert_contains "$show" "Answer: go with option A" "the chat-answered row lost the captain answer"
