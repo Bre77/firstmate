@@ -166,7 +166,7 @@ run_default_gate() {
     ran=true
     for test_script in "$TOPLEVEL"/tests/*.test.sh; do
       echo "gate: $(basename "$test_script")"
-      ( cd "$TOPLEVEL" && "$test_script" ) || rc=1
+      ( cd "$TOPLEVEL" && bash "$test_script" ) || rc=1
     done
   fi
   if [ "${#targets[@]}" -eq 0 ] && [ "$ran" = false ]; then
