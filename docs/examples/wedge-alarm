@@ -20,3 +20,10 @@
 # happens overnight reaches you even away from the machine.
 osascript
 command: curl -fsS -H "Title: firstmate wedge alarm" -d "$1" https://ntfy.sh/replace-with-your-topic
+
+# Linux (or any platform with no built-in OS channel): `auto` alone only
+# writes the durable marker, so pair it with a command: line. This fork ships
+# bin/fm-notify-captain.sh, a phone-paging channel (docs/wedge-alarm.md
+# "fm-notify-captain.sh"); point command: at it directly:
+# auto
+# command: /path/to/firstmate/bin/fm-notify-captain.sh --tier urgent "$1"

@@ -1260,7 +1260,11 @@ inject_msg() {  # <message> [state]
   if [ "$verdict" = empty ]; then
     return 0  # Backend confirmed the submit.
   fi
-  log "inject failed: submit unconfirmed after $retries retries (verdict=$verdict, text may be in composer)"
+  # A bare 'send-failed' verdict conflates a failed initial type (nothing
+  # reached the pane) with an Enter that never confirmed after typing landed
+  # (text sitting unsent); re-reading composer state tells them apart.
+  composer=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)
+  log "inject failed: submit unconfirmed after $retries retries (verdict=$verdict, composer now: ${composer:-unknown})"
   return 1
 }
 
