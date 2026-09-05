@@ -2576,6 +2576,34 @@ test_inject_msg_herdr_submits_through_backend_dispatch() {
   pass "inject_msg: dispatches busy-guard/composer-guard/submit through the herdr backend and succeeds on a confirmed empty composer"
 }
 
+# A failed submit's verdict alone cannot tell "nothing was typed" apart from
+# "typed but never confirmed sent"; inject_msg re-reads and logs composer
+# state after the failure so the log carries that distinction on its own.
+test_inject_msg_logs_composer_state_after_failed_submit() {
+  local dir state log seen_file
+  dir=$(make_supercase inject-post-failure-composer)
+  state="$dir/state"; log="$dir/daemon.log"; seen_file="$dir/composer-checked"
+  afk_enter "$state"
+  (
+    fm_backend_target_exists() { return 0; }
+    pane_is_busy() { return 1; }
+    # The pre-send composer guard must read 'empty' to reach send_text_submit
+    # at all; the second call is the post-failure re-read this test verifies,
+    # flipped to 'pending' by the marker file the first call leaves behind.
+    # shellcheck disable=SC2153  # SEEN_FILE is an intentional prefix-assigned env var, not a seen_file typo
+    fm_backend_composer_state() {
+      if [ -f "$SEEN_FILE" ]; then printf 'pending'; else : > "$SEEN_FILE"; printf 'empty'; fi
+    }
+    fm_backend_send_text_submit() { printf 'send-failed'; }
+    SEEN_FILE="$seen_file" LOG="$log" FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" \
+      inject_msg "hello" "$state" && fail "inject_msg should report failure when the submit verdict is send-failed"
+    true
+  ) || fail "post-failure composer re-read subshell failed"
+  grep -F 'verdict=send-failed, composer now: pending' "$log" >/dev/null \
+    || fail "failed-submit log line did not carry the post-failure composer state: $(cat "$log" 2>/dev/null)"
+  pass "inject_msg: a failed submit re-reads and logs composer state so a stuck-vs-never-typed digest is distinguishable from the log alone"
+}
+
 # Safety-critical (task fm-composer-shellglyph-safety): the away-mode injector
 # must NEVER type an escalation into a dead-shell pane. A bare shell prompt
 # classifies `unknown` (not `pending`), and inject_msg now defers on anything
@@ -2736,5 +2764,6 @@ test_inject_msg_herdr_busy_guard_defers
 test_inject_msg_herdr_composer_guard_defers
 test_inject_msg_herdr_pane_gone_defers
 test_inject_msg_herdr_submits_through_backend_dispatch
+test_inject_msg_logs_composer_state_after_failed_submit
 test_inject_msg_defers_on_dead_shell_unknown
 test_inject_msg_defers_on_unrecognized_composer_state

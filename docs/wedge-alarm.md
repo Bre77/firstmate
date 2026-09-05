@@ -14,12 +14,21 @@ It lists channel directives, one per non-empty, non-comment line, and every list
 - `off` disables every active alert while retaining the durable marker and tmux flash.
 - `auto` or `default` resolves to `osascript` on macOS.
   Other platforms have no built-in OS channel, so configure `command:` when a durable marker alone is insufficient.
+  An unconfigured `auto` on those platforms writes only the durable marker and reaches no one, including overnight.
 - `osascript` posts a macOS Notification Center banner outside the terminal pane.
 - `herdr` calls `herdr notification show` outside the supervised pane.
 - `command:<cmd>` runs `<cmd>` through `sh -c` with the alarm summary as `$1` and on stdin, allowing delivery to a phone or pager service.
 
 An absent `config/wedge-alarm` behaves as `auto`, which is default-on on macOS.
 This is deliberate because the alarm fires only after a genuine max-defer wedge and is rate-limited to at most once per max-defer window.
+
+### fm-notify-captain.sh
+
+This fork's `bin/fm-notify-captain.sh` pages the captain's phone through Better Stack on-call (`AGENTS.md` section 9).
+Wire it in with `command: /path/to/firstmate/bin/fm-notify-captain.sh --tier urgent "$1"`.
+It is not a built-in wedge-alarm channel, so it has no automatic dedup or resolve against this alarm's own rate limiting.
+A long wedge therefore opens one Better Stack incident per re-alarm window.
+If that is too noisy, wrap the call in your own once-per-wedge guard, for example skipping the page when the incident id from the last call is still unresolved.
 
 Each channel is best-effort.
 A missing binary or non-zero exit logs a warning and continues to the next channel without crashing the daemon loop.
