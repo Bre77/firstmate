@@ -1029,6 +1029,55 @@ test_scheduled_wait_wording() {
   pass "fm-brief.sh: scheduled-wait pause instructions are pinned in every scaffold"
 }
 
+test_paused_vs_blocked_captain_wait_wording() {
+  # AGENTS.md section 8: paused is a bounded EXTERNAL wait that clears on its
+  # own, blocked is anything needing firstmate/captain action. Observed
+  # 2026-08-23: workers declared "paused: awaiting captain merge decision" and
+  # "paused: doc commit awaiting captain decision", sitting unsurfaced on the
+  # long pause recheck cadence for 12-22 hours with finished work unlanded.
+  # Every scaffold must state the rule unambiguously with one example of each.
+  local home brief
+
+  home="$TMP_ROOT/paused-vs-blocked-home"
+  mkdir -p "$home/data"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-pvb-ship firstmate --mode no-mistakes >/dev/null 2>&1 \
+    || fail "fm-brief.sh ship scaffold exited non-zero"
+  brief="$home/data/brief-pvb-ship/brief.md"
+  # shellcheck disable=SC2016 # Literal backticks are deliberate: pinning the rule text verbatim.
+  assert_grep 'ALWAYS `blocked:`, never `paused:`' "$brief" \
+    "ship brief did not unambiguously require blocked: for a captain/firstmate wait"
+  # shellcheck disable=SC2016 # Literal backticks are deliberate: pinning the examples verbatim.
+  assert_grep '`blocked: awaiting captain merge decision on fm/foo`' "$brief" \
+    "ship brief dropped the blocked-on-captain example"
+  # shellcheck disable=SC2016
+  assert_grep '`paused: awaiting upstream CI`' "$brief" \
+    "ship brief dropped the genuinely-external paused example"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-pvb-scout firstmate --scout >/dev/null 2>&1 \
+    || fail "fm-brief.sh scout scaffold exited non-zero"
+  brief="$home/data/brief-pvb-scout/brief.md"
+  # shellcheck disable=SC2016
+  assert_grep 'ALWAYS `blocked:`, never `paused:`' "$brief" \
+    "scout brief did not unambiguously require blocked: for a captain/firstmate wait"
+  # shellcheck disable=SC2016
+  assert_grep '`blocked: awaiting captain merge decision on fm/foo`' "$brief" \
+    "scout brief dropped the blocked-on-captain example"
+  # shellcheck disable=SC2016
+  assert_grep '`paused: awaiting upstream CI`' "$brief" \
+    "scout brief dropped the genuinely-external paused example"
+
+  FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-pvb-sm --secondmate --no-projects >/dev/null 2>&1 \
+    || fail "fm-brief.sh secondmate scaffold exited non-zero"
+  brief="$home/data/brief-pvb-sm/brief.md"
+  # shellcheck disable=SC2016
+  assert_grep 'ALWAYS `blocked:`, never `paused:`' "$brief" \
+    "secondmate charter did not unambiguously require blocked: for a captain/firstmate wait"
+
+  pass "fm-brief.sh: the paused-vs-blocked captain-wait rule is pinned in every scaffold"
+}
+
 # Extract the scaffold's own fenced `<verb>: ...` example, with the placeholder
 # slug filled in so the line is what a crew would really append.
 brief_decision_example() {  # <brief> <verb> [required-substring] -> status line
@@ -1143,5 +1192,6 @@ test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
 test_scheduled_wait_wording
+test_paused_vs_blocked_captain_wait_wording
 test_ship_brief_decision_instruction_matches_the_parseable_form
 test_secondmate_charter_decision_resolve_round_trips
