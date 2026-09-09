@@ -313,6 +313,90 @@ SH
   pass "foreign secondmate queue stalls notify once, remain byte-stable, and stay quiet when empty or healthy"
 }
 
+# Shared fixture for the in-turn suppression matrix below: one mate meta on
+# tmux and a queue with one row of the given age. The caller drives
+# make_case's fakebin liveness verdict via FM_FAKE_TMUX_CURRENT_COMMAND (a
+# harness name such as claude reads alive; empty reads dead).
+setup_secondmate_stall_fixture() {  # <case-name> <row-age-secs>
+  local name=$1 age=$2 dir state sub epoch
+  dir=$(make_case "$name")
+  state="$dir/state"
+  sub="$dir/secondmate"
+  mkdir -p "$sub/state" "$sub/data"
+  printf 'mate\n' > "$sub/.fm-secondmate-home"
+  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' \
+    "$sub" > "$state/mate.meta"
+  epoch=$(( $(date +%s) - age ))
+  printf '%s\t7\tcheck\trouted\tcheck: routed row\n' "$epoch" > "$sub/state/.wake-queue"
+  printf '%s\n' "$dir"
+}
+
+test_secondmate_stall_under_threshold_never_alarms() {
+  local dir state out
+  dir=$(setup_secondmate_stall_fixture secondmate-stall-under-threshold 5)
+  state="$dir/state"
+  out="$dir/watch.out"
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_FAKE_TMUX_CURRENT_COMMAND='' \
+    FM_SECONDMATE_WAKE_STALL_SECS=300 FM_SECONDMATE_WAKE_STALL_HARD_SECS=900 \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 2 > "$out" 2> "$dir/watch.err" || true
+  ! grep -F 'secondmate wake-loop stalled' "$out" >/dev/null \
+    || fail "a row younger than the stall threshold alarmed"
+  pass "a foreign row younger than the stall threshold never alarms"
+}
+
+test_secondmate_stall_over_threshold_in_turn_does_not_alarm() {
+  local dir state out
+  dir=$(setup_secondmate_stall_fixture secondmate-stall-in-turn 120)
+  state="$dir/state"
+  out="$dir/watch.out"
+  printf 'pending:downtime:gen-in-turn\n' > "$dir/secondmate/state/.watcher-down"
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_FAKE_TMUX_CURRENT_COMMAND='claude' \
+    FM_SECONDMATE_WAKE_STALL_SECS=60 FM_SECONDMATE_WAKE_STALL_HARD_SECS=900 \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 2 > "$out" 2> "$dir/watch.err" || true
+  ! grep -F 'secondmate wake-loop stalled' "$out" >/dev/null \
+    || fail "a row past the threshold but with the mate's own watcher down for an in-progress turn and its endpoint alive still alarmed: $(cat "$out")"
+  pass "a row past the threshold does not alarm while the mate shows a live in-turn signal"
+}
+
+test_secondmate_stall_over_hard_ceiling_alarms_regardless_of_in_turn() {
+  local dir state out
+  dir=$(setup_secondmate_stall_fixture secondmate-stall-hard-ceiling 1000)
+  state="$dir/state"
+  out="$dir/watch.out"
+  printf 'pending:downtime:gen-hard\n' > "$dir/secondmate/state/.watcher-down"
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_FAKE_TMUX_CURRENT_COMMAND='claude' \
+    FM_SECONDMATE_WAKE_STALL_SECS=60 FM_SECONDMATE_WAKE_STALL_HARD_SECS=900 \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 2 > "$out" 2> "$dir/watch.err" || true
+  grep -F 'check: secondmate wake-loop stalled: mate=mate row=7' "$out" >/dev/null \
+    || fail "a row past the hard ceiling did not alarm despite a live in-turn signal: $(cat "$out")"
+  pass "a row past the hard ceiling alarms even while the mate shows an in-turn signal"
+}
+
+test_secondmate_stall_over_threshold_idle_alarms() {
+  local dir state out
+  dir=$(setup_secondmate_stall_fixture secondmate-stall-idle 120)
+  state="$dir/state"
+  out="$dir/watch.out"
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_FAKE_TMUX_CURRENT_COMMAND='' \
+    FM_SECONDMATE_WAKE_STALL_SECS=60 FM_SECONDMATE_WAKE_STALL_HARD_SECS=900 \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 2 > "$out" 2> "$dir/watch.err" || true
+  grep -F 'check: secondmate wake-loop stalled: mate=mate row=7' "$out" >/dev/null \
+    || fail "a row past the threshold with no downtime marker and an idle mate did not alarm: $(cat "$out")"
+  pass "a row past the threshold with no in-turn signal alarms as before"
+}
+
 test_secondmate_stall_marker_rejects_symlink() {
   local dir state sub fakebin marker outside expected
   dir=$(make_case secondmate-stall-marker-symlink)
@@ -1442,6 +1526,10 @@ test_bounded_lock_handoff_after_contention
 test_live_presentation_holder_is_deadlined_without_weakening_ack
 test_malformed_presentation_lock_reports_acquire_failure
 test_secondmate_foreign_queue_stall_is_one_shot_and_read_only
+test_secondmate_stall_under_threshold_never_alarms
+test_secondmate_stall_over_threshold_in_turn_does_not_alarm
+test_secondmate_stall_over_hard_ceiling_alarms_regardless_of_in_turn
+test_secondmate_stall_over_threshold_idle_alarms
 test_secondmate_stall_marker_rejects_symlink
 test_acknowledged_stall_publication_survives_pre_marker_crash
 test_empty_prefix_mate_preserves_other_mate_receipt
