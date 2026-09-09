@@ -99,9 +99,13 @@ FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 # surfacing immediately. This is a small explicit word list, not a broad
 # regex, so widening what counts as "waiting on us" is a deliberate edit here
 # rather than an accidental prose overlap with a genuinely external wait (for
-# example "paused: awaiting upstream CI" must never match). FM_CLASSIFY_PAUSED_ON_CAPTAIN_RE
-# overrides the list; absent, this default applies.
-FM_CLASSIFY_PAUSED_ON_CAPTAIN_RE_DEFAULT='captain|firstmate|merge|approv|decision|your call'
+# example "paused: awaiting upstream CI" must never match). "merge decision" is
+# stated as a phrase rather than the bare word "merge" because a bare "merge"
+# also matches "merged" - ordinary past-tense prose reporting an unrelated PR
+# state ("waiting for upstream checks green, merged, and blocked state to
+# clear"), never a real wait on us. FM_CLASSIFY_PAUSED_ON_CAPTAIN_RE overrides
+# the list; absent, this default applies.
+FM_CLASSIFY_PAUSED_ON_CAPTAIN_RE_DEFAULT='captain|firstmate|merge decision|approv|decision|your call'
 
 # Bounded re-surface cadence for a declared pause or a verified captain hold.
 # Far longer than the wedge threshold (FM_STALE_ESCALATE_SECS, default 240s), it

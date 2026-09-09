@@ -72,7 +72,34 @@ test_paused_on_upstream_stays_paused() {
   status_is_paused_on_captain "$line" \
     && fail "a vendor rate-limit wait false-matched the captain-named pattern: $line"
 
+  # A bare "merge" substring inside ordinary past-tense prose ("merged") must
+  # never false-match: tests/fm-daemon.test.sh pins this exact pause note as a
+  # genuine external wait, so the pattern deliberately matches the PHRASE
+  # "merge decision" rather than the bare word "merge".
+  line='paused: waiting for upstream checks green, merged, and blocked state to clear'
+  status_is_paused_on_captain "$line" \
+    && fail "'merged' inside ordinary status prose false-matched the merge pattern: $line"
+  status_is_captain_relevant "$line" \
+    && fail "'merged' inside ordinary status prose became captain-relevant: $line"
+
   pass "a paused: line naming a genuine external wait keeps the long pause recheck cadence"
+}
+
+test_paused_on_merge_decision_without_naming_captain() {
+  # "merge decision" alone (no "captain"/"firstmate" word) still names a wait
+  # only firstmate can clear, and must classify as blocked - the "merge word"
+  # case named in the pattern-list rule, distinct from the captain/firstmate
+  # word cases covered above.
+  local line='paused: docs commit awaiting merge decision'
+
+  status_is_paused_on_captain "$line" \
+    || fail "a bare merge-decision wait was not recognised as waiting on us: $line"
+  status_is_captain_relevant "$line" \
+    || fail "a bare merge-decision wait did not classify as captain-relevant (blocked): $line"
+  status_is_paused_or_captain_held "$line" \
+    && fail "a bare merge-decision wait kept the declared-wait absorb cadence: $line"
+
+  pass "a paused: line naming a merge decision classifies as blocked even without the word captain"
 }
 
 test_blocked_stays_blocked() {
@@ -109,5 +136,6 @@ test_paused_on_captain_never_touches_decision_grammar() {
 
 test_paused_on_captain_is_blocked
 test_paused_on_upstream_stays_paused
+test_paused_on_merge_decision_without_naming_captain
 test_blocked_stays_blocked
 test_paused_on_captain_never_touches_decision_grammar
