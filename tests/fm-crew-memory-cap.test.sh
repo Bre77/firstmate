@@ -78,7 +78,7 @@ make_spawn_case() {
   touch "$home/state/.last-watcher-beat"
   for id in "$@"; do
     mkdir -p "$home/data/$id"
-    printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+    printf "# Task\n## Captain's intent\nExercise the memory cap for %s.\n\n## Firstmate spec\nSpawn only.\n" "$id" > "$home/data/$id/brief.md"
   done
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin|$launchlog"
 }
@@ -101,8 +101,8 @@ run_spawn() {
   local home=$1 wt=$2 fakebin=$3 launchlog=$4
   shift 4
   : > "$launchlog"
-  env -u FM_CREW_MEMORY_HIGH -u FM_CREW_MEMORY_MAX -u FM_CREW_MEMORY_SWAP \
-    FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+  env -u FM_CREW_MEMORY_CAP -u FM_CREW_MEMORY_HIGH -u FM_CREW_MEMORY_MAX -u FM_CREW_MEMORY_SWAP \
+    FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$home/user-home" CLAUDE_CONFIG_DIR='' \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
@@ -114,7 +114,7 @@ run_spawn_with_env() {
   local home=$1 wt=$2 fakebin=$3 launchlog=$4
   shift 4
   : > "$launchlog"
-  FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+  env -u FM_CREW_MEMORY_CAP FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$home/user-home" CLAUDE_CONFIG_DIR='' \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
@@ -124,7 +124,7 @@ run_spawn_with_env() {
 
 expected_unwrapped_claude_launch() {
   local brief=$1
-  printf '%s' "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions --settings '{\"attribution\":{\"commit\":\"\"}}' \"\$('$ROOT/bin/fm-operational-input.sh' encode launch-brief < '$brief')\""
+  printf '%s' "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' \"\$('$ROOT/bin/fm-operational-input.sh' encode launch-brief < '$brief')\""
 }
 
 # Given a full launch string wrapped as:
@@ -159,7 +159,7 @@ test_ship_spawn_wraps_launch_with_default_caps() {
   assert_not_contains "$out" "without a per-crew memory cap" "healthy systemd-run should not trigger the fallback warning"
 
   launch=$(cat "$LAUNCH_LOG")
-  expected_inner=$(expected_unwrapped_claude_launch "$HOME_DIR/data/$id/brief.md")
+  expected_inner=$(expected_unwrapped_claude_launch "$HOME_DIR/data/$id/launch-brief.md")
   assert_wrapped_launch "$launch" 8G 12G 2G "$expected_inner" "ship spawn default caps"
   pass "ship spawn wraps the launch in a systemd --user scope with the 8G/12G/2G defaults"
 }
@@ -176,7 +176,7 @@ test_scout_spawn_is_also_wrapped() {
   assert_contains "$out" "spawned $id harness=claude kind=scout" "spawn did not report scout kind"
 
   launch=$(cat "$LAUNCH_LOG")
-  expected_inner=$(expected_unwrapped_claude_launch "$HOME_DIR/data/$id/brief.md")
+  expected_inner=$(expected_unwrapped_claude_launch "$HOME_DIR/data/$id/launch-brief.md")
   assert_wrapped_launch "$launch" 8G 12G 2G "$expected_inner" "scout spawn default caps"
   pass "scout spawn is wrapped in a memory-capped scope exactly like a ship spawn"
 }
@@ -188,7 +188,7 @@ test_env_vars_override_default_caps() {
   read_case_record "$rec"
 
   : > "$LAUNCH_LOG"
-  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+  out=$(env -u FM_CREW_MEMORY_CAP FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" HOME="$HOME_DIR/user-home" CLAUDE_CONFIG_DIR='' \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
@@ -199,7 +199,7 @@ test_env_vars_override_default_caps() {
   expect_code 0 "$status" "ship spawn with overridden memory env vars should succeed"
 
   launch=$(cat "$LAUNCH_LOG")
-  expected_inner=$(expected_unwrapped_claude_launch "$HOME_DIR/data/$id/brief.md")
+  expected_inner=$(expected_unwrapped_claude_launch "$HOME_DIR/data/$id/launch-brief.md")
   assert_wrapped_launch "$launch" 1G 2G 512M "$expected_inner" "ship spawn overridden caps"
   pass "FM_CREW_MEMORY_HIGH/_MAX/_SWAP override the 8G/12G/2G defaults"
 }
@@ -219,7 +219,7 @@ test_unavailable_systemd_run_falls_back_unwrapped_with_warning() {
   assert_contains "$out" "spawned $id harness=claude kind=ship" "fallback spawn did not still report success"
 
   launch=$(cat "$LAUNCH_LOG")
-  expected=$(expected_unwrapped_claude_launch "$HOME_DIR/data/$id/brief.md")
+  expected=$(expected_unwrapped_claude_launch "$HOME_DIR/data/$id/launch-brief.md")
   [ "$launch" = "$expected" ] \
     || fail "fallback launch should be byte-identical to the unwrapped claude launch"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "spawn falls back to an unwrapped launch, with a warning, when systemd-run --user is unavailable"

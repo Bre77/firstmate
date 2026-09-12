@@ -24,6 +24,7 @@ The original launch command (env-var prefixes, `$(cat ...)` substitutions, quoti
 Because a transient `--scope` inherits the invoking shell's environment (verified below), the existing `export GOTMPDIR=...` sent to the pane immediately before the launch line still reaches the harness process unchanged.
 
 Defaults: `MemoryHigh=8G`, `MemoryMax=12G`, `MemorySwapMax=2G`, overridable per spawn via `FM_CREW_MEMORY_HIGH` / `FM_CREW_MEMORY_MAX` / `FM_CREW_MEMORY_SWAP`.
+`FM_CREW_MEMORY_CAP=off` skips the wrap entirely, with no fallback warning; the behavior suite sets it in `tests/lib.sh` so launch-shape assertions do not depend on whether the host has a user systemd instance.
 `MemoryHigh` is a soft throttle: reclaim pressure inside the cgroup slows the crew down without killing it.
 `MemoryMax` is the hard ceiling: exceeding it gets a process **inside that cgroup** OOM-killed by the kernel, scoped to the crew, never the host's own OOM killer picking an arbitrary victim process elsewhere.
 `MemorySwapMax` stops a runaway crew from thrashing the host into swap instead of just dying cleanly.

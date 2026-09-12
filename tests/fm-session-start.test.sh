@@ -256,7 +256,7 @@ SH
 }
 
 make_fake_ps_pi_holder() {
-  local fakebin=$1 holder_pid=$2
+  local fakebin=$1 holder_pid=$2 harness=${3:-pi}
   cat > "$fakebin/ps" <<SH
 #!/usr/bin/env bash
 set -u
@@ -269,7 +269,7 @@ done
 case "\$*" in
   *"comm="*)
     if [ "\$pid" = "$holder_pid" ]; then
-      printf '/usr/local/bin/pi\n'
+      printf '/usr/local/bin/$harness\n'
     else
       printf '/bin/zsh\n'
     fi
@@ -277,7 +277,7 @@ case "\$*" in
     ;;
   *"args="*)
     if [ "\$pid" = "$holder_pid" ]; then
-      printf 'pi\n'
+      printf '$harness\n'
     else
       printf 'zsh\n'
     fi
@@ -697,6 +697,21 @@ write_pi_loaded_markers() {
   write_pi_turnend_loaded_marker "$home" "$root" "$pid"
 }
 
+install_omp_extension_fixtures() {
+  local root=$1
+  mkdir -p "$root/.omp/extensions"
+  cp "$ROOT/.omp/extensions/fm-primary-omp-watch.ts" "$root/.omp/extensions/fm-primary-omp-watch.ts"
+  cp "$ROOT/.omp/extensions/fm-primary-turnend-guard.ts" "$root/.omp/extensions/fm-primary-turnend-guard.ts"
+}
+
+write_omp_loaded_markers() {
+  local home=$1 root=$2 pid=$3 version
+  version=$(hash_file_for_test "$root/.omp/extensions/fm-primary-omp-watch.ts")
+  printf '%s\n%s\n' "$version" "$pid" > "$home/state/.omp-watch-extension-loaded"
+  version=$(hash_file_for_test "$root/.omp/extensions/fm-primary-turnend-guard.ts")
+  printf '%s\n%s\n' "$version" "$pid" > "$home/state/.omp-turnend-extension-loaded"
+}
+
 # --- context digest: absent vs empty vs present -----------------------------
 
 test_context_digest_absent_empty_present() {
@@ -944,7 +959,7 @@ SH
 # still leads, live fleet identity now outranks curated memory, and the
 # read-once contract arrives before the payload it governs.
 test_output_ordering_diagnostics_lead() {
-  local rec root home fakebin mask out lock_line boot_line wake_line read_once_line
+  local rec root home fakebin out lock_line boot_line wake_line read_once_line
   local context_line fleet_line next_line inventory_line missing_line
   rec=$(new_world ordering)
   IFS='|' read -r root home fakebin <<EOF
@@ -953,27 +968,12 @@ EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
   # Force a MISSING diagnostic line so the bootstrap section is non-trivial.
-  # node can also live in a system BASE_PATH dir on some hosts, so mask it with
-  # a command()/node() override (the same technique fm-bootstrap.test.sh's
-  # git-required and jq cases use) to keep the assertion host-independent.
   rm -f "$fakebin/node"
-  mask="$home/mask-node.bash"
-  cat > "$mask" <<'SH'
-command() {
-  if [ "${1:-}" = -v ] && [ "${2:-}" = node ]; then
-    return 1
-  fi
-  builtin command "$@"
-}
-node() {
-  return 127
-}
-SH
 
   printf 'window=fm-sess:w1\nkind=ship\n' > "$home/state/task-a.meta"
   printf 'Captain memory that may be truncated away safely.\n' > "$home/data/captain.md"
 
-  out=$(BASH_ENV="$mask" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  out=$(run_session_start "$home" "$root" "$fakebin:$(fm_test_base_path_sans "$BASE_PATH" node)")
 
   lock_line=$(printf '%s\n' "$out" | grep -n '^LOCK$' | head -1 | cut -d: -f1)
   boot_line=$(printf '%s\n' "$out" | grep -n '^BOOTSTRAP$' | head -1 | cut -d: -f1)
@@ -1365,34 +1365,19 @@ EOF
 # --- composition: real scripts run, not reimplemented ------------------------
 
 test_composition_invokes_real_scripts() {
-  local rec root home fakebin mask out
+  local rec root home fakebin out
   rec=$(new_world composition)
   IFS='|' read -r root home fakebin <<EOF
 $rec
 EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
-  # node can also live in a system BASE_PATH dir on some hosts, so mask it with
-  # a command()/node() override (the same technique fm-bootstrap.test.sh's
-  # git-required and jq cases use) to keep the assertion host-independent.
   rm -f "$fakebin/node"
-  mask="$home/mask-node.bash"
-  cat > "$mask" <<'SH'
-command() {
-  if [ "${1:-}" = -v ] && [ "${2:-}" = node ]; then
-    return 1
-  fi
-  builtin command "$@"
-}
-node() {
-  return 127
-}
-SH
 
   printf 'needs-decision: pick a library\n' > "$home/state/task-z.status"
   append_wake "$home/state" signal task-z.status "needs-decision: pick a library"
 
-  out=$(BASH_ENV="$mask" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  out=$(run_session_start "$home" "$root" "$fakebin:$(fm_test_base_path_sans "$BASE_PATH" node)")
 
   # fm-lock.sh's own exact success text.
   assert_contains "$out" "lock acquired: harness pid" "fm-lock.sh's real output did not appear (composition, not reimplementation)"
@@ -1405,7 +1390,7 @@ SH
   pass "fm-session-start.sh composes the real fm-lock.sh, fm-bootstrap.sh, and fm-wake-drain.sh output verbatim"
 }
 
-test_branch_outcome_replay_and_lease_sweep() {
+test_branch_outcome_replay_respects_captain_barrier_and_lease_sweep() {
   local rec root home fakebin out
   rec=$(new_world branch-recovery)
   IFS='|' read -r root home fakebin <<EOF
@@ -1414,9 +1399,12 @@ EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_harness "$fakebin" pi
 
-  # A crash window the locked start must close: the supervision branch stored
-  # an outcome durably that never reached main, plus one lease whose
+  # A crash window the locked start must preserve: the supervision branch
+  # stored a leading routine row and a captain row that never reached Pi, plus one lease whose
   # supervising process died and one still held by a live process.
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-a --verdict routine --summary 'worker recovered automatically' >/dev/null \
+    || fail "could not seed the unread routine branch outcome"
   FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
     --task task-b --verdict captain --summary 'PR https://example.com/pr/b checks green' >/dev/null \
     || fail "could not seed the unread branch outcome"
@@ -1426,18 +1414,24 @@ EOF
 
   out=$(run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH")
   assert_contains "$out" "BRANCH OUTCOMES (handled by the supervision branch, not yet seen by this session):" \
-    "locked start did not replay the unread branch outcome"
-  assert_contains "$out" "https://example.com/pr/b" "replayed outcome lost its content"
+    "locked start did not replay the leading routine branch outcome"
+  assert_contains "$out" "worker recovered automatically" "replayed routine outcome lost its content"
+  assert_not_contains "$out" "https://example.com/pr/b" "locked start crossed the captain delivery barrier"
+  assert_contains "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread)" \
+    "https://example.com/pr/b" "locked start marked the unrendered captain outcome read"
+  [ "$(cat "$home/state/.branch-outcomes-cursor")" = 1 ] || fail "locked start advanced past the captain row"
   [ ! -e "$home/state/.lease-task-dead" ] || fail "locked start left a provably dead lease in place"
   [ -e "$home/state/.lease-task-live" ] || fail "locked start swept a live lease"
 
-  # Replay is one-shot: presenting the digest is the delivery, so the next
-  # locked start stays silent about the same outcome.
+  # Routine replay is one-shot, while the captain row remains held for Pi's
+  # sequence-keyed visible-entry reconciliation.
   out=$(run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH")
   case "$out" in
     *"BRANCH OUTCOMES"*) fail "second start re-presented already-replayed branch outcomes" ;;
   esac
-  pass "locked Pi session start replays unread branch outcomes once and sweeps only dead leases"
+  assert_contains "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread)" \
+    "https://example.com/pr/b" "second start consumed the captain row without a Pi entry"
+  pass "locked Pi session start replays leading routine outcomes, preserves the captain barrier, and sweeps only dead leases"
 }
 
 test_non_pi_session_start_leaves_branch_state_untouched() {
@@ -1486,10 +1480,14 @@ SH
 
 # The locked startup scan may need the same expensive current-state read that a
 # busy validation makes slow. It belongs to the detached startup worker, so the
-# digest must finish before this 8s answer exists; the answer then has to create
-# the ordinary durable inactive-outcome wake rather than disappear off-path.
+# digest must finish while that read is still outstanding; the answer then has to
+# create the ordinary durable inactive-outcome wake rather than disappear
+# off-path. The slow read is held open by this case rather than by a fixed sleep,
+# so "the digest did not wait for it" is decided by what had happened when the
+# digest returned and not by how fast the host was.
 test_inactive_reconcile_never_blocks_the_digest() {
-  local rec root home fakebin world worktree crew_state calls out started elapsed waited=0
+  local rec root home fakebin world worktree crew_state calls out waited=0
+  local release_gate read_finished
   rec=$(new_world inactive-reconcile-deferred)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -1503,6 +1501,8 @@ EOF
   make_fake_ps_claude "$fakebin"
   fm_git_init_commit "$worktree"
 
+  release_gate="$world/slow-state-read.release"
+  read_finished="$world/slow-state-read.finished"
   cat > "$fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -1516,7 +1516,15 @@ if [ "${1:-} ${2:-}" = 'axi status' ]; then
   else
     printf '%s\n' 'blocking' >> "${FM_FAKE_NM_CALLS:?}"
   fi
-  sleep 8
+  # Stay outstanding until the case releases this read. A caller that waits for
+  # it therefore waits indefinitely rather than for a fixed interval a loaded
+  # host could out-run. The tick bound only stops a broken case hanging forever.
+  ticks=0
+  while [ ! -e "${FM_FAKE_NM_RELEASE:?}" ] && [ "$ticks" -lt 300 ]; do
+    sleep 0.1
+    ticks=$((ticks + 1))
+  done
+  : > "${FM_FAKE_NM_READ_FINISHED:?}"
   printf '%s\n' 'slow validation state answered'
 fi
 exit 0
@@ -1537,18 +1545,18 @@ SH
   touch -t 202001010000 "$home/state/slow-child.meta" \
     "$home/state/slow-child.status" "$home/state/slow-child.turn-ended"
 
-  started=$(date +%s)
   out=$(FM_BACKEND=tmux FM_FAKE_HARNESS_PID="$SESSION_START_TEST_HARNESS_PID" \
-    FM_FAKE_NM_CALLS="$calls" FM_INACTIVE_RECONCILE_SECS=60 \
-    FM_INACTIVE_RECONCILE_BUDGET_SECS=10 FM_INACTIVE_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_NM_CALLS="$calls" FM_FAKE_NM_RELEASE="$release_gate" \
+    FM_FAKE_NM_READ_FINISHED="$read_finished" FM_INACTIVE_RECONCILE_SECS=60 \
+    FM_INACTIVE_RECONCILE_BUDGET_SECS=30 FM_INACTIVE_CREW_STATE_BIN="$crew_state" \
     run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  elapsed=$(( $(date +%s) - started ))
 
   assert_contains "$out" "SESSION START" "the digest did not complete"
-  [ "$elapsed" -lt 8 ] \
-    || fail "the digest waited ${elapsed}s for inactive reconciliation's 8s state read"
+  assert_absent "$read_finished" \
+    "the digest waited for inactive reconciliation's still-unreleased state read"
   [ "$(grep -c '^blocking$' "$calls" 2>/dev/null || true)" -eq 0 ] \
     || fail "the digest called the slow state reader on its blocking path"
+  : > "$release_gate"
 
   while ! grep -Fq $'\tcheck\tinactive-outcome:' "$home/state/.wake-queue" 2>/dev/null \
     && [ "$waited" -lt 150 ]; do
@@ -1745,7 +1753,7 @@ EOF
   assert_not_contains "$out" "DONE-ROW-LINE" "tasks-axi compact digest listed a done row at startup"
   assert_contains "$out" "--- compact-startup ---" "in-flight meta identity disappeared from startup recovery digest"
   assert_contains "$out" "worktree=$home/projects/firstmate" "in-flight recovery worktree identity disappeared from startup digest"
-  assert_contains "$out" "Full task bodies remain available on demand: tasks-axi show <id> --full" \
+  assert_contains "$out" "Full task bodies remain available on demand: bin/fm-tasks-axi.sh show <id> --full" \
     "compact digest omitted the full-body lookup pointer"
   assert_contains "$out" "ready_public_followups: 0 delivery-ready obligations" \
     "the composed listing dropped a real signal from the dispatchable set"
@@ -1789,7 +1797,7 @@ EOF
   assert_not_contains "$out" "ready-4,queued" "the queued bound did not actually bound the ready listing"
   assert_contains "$out" "(shown 3 of 7 ready queued item(s))" \
     "the bounded queued listing did not report what it showed"
-  assert_contains "$out" "(4 more queued - tasks-axi ready --file $home/data/backlog.md)" \
+  assert_contains "$out" "(4 more queued - bin/fm-tasks-axi.sh ready)" \
     "the bounded queued listing did not disclose an exact remainder and how to see it"
 
   # The bound is for dispatchable work only: held and blocked rows stay whole.
@@ -2518,6 +2526,51 @@ EOF
   pass "session start accepts current Pi markers written before lock acquisition"
 }
 
+test_omp_supervision_block_and_diagnostic() {
+  local rec root home fakebin out block_count
+  rec=$(new_world omp-supervision-block)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_harness "$fakebin" omp
+
+  out=$(FM_FAKE_HARNESS=omp run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  block_count=$(printf '%s\n' "$out" | grep -c '^SUPERVISION OPERATING INSTRUCTIONS - primary harness:')
+  [ "$block_count" -eq 1 ] || fail "expected exactly one supervision block, got $block_count"
+  assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: omp" "omp supervision block missing"
+  assert_contains "$out" "Mode: omp (Oh My Pi) extension background wake." "omp snippet missing from session start"
+  assert_contains "$out" "OMP_WATCH_EXTENSION: not loaded" "omp extension load diagnostic missing"
+  assert_contains "$out" "so $root/.omp/extensions/fm-primary-turnend-guard.ts and $root/.omp/extensions/fm-primary-omp-watch.ts auto-load" "omp diagnostic omits the two tracked extension paths"
+  assert_not_contains "$out" "PI_WATCH_EXTENSION" "omp primary must not receive the Pi diagnostic"
+  assert_not_contains "$out" "project trust" "omp diagnostic must not carry Pi's trust prerequisite"
+  pass "session start emits the omp block and reports omp extension load state"
+}
+
+test_omp_diagnostic_accepts_prelock_loaded_marker() {
+  local rec root home fakebin out holder_pid
+  rec=$(new_world omp-prelock-loaded-marker)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+
+  sleep 300 &
+  holder_pid=$!
+  make_fake_ps_pi_holder "$fakebin" "$holder_pid" omp
+  install_omp_extension_fixtures "$root"
+  write_omp_loaded_markers "$home" "$root" "$holder_pid"
+
+  out=$(FM_FAKE_HARNESS=omp run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+
+  assert_contains "$out" "primary harness: omp" "omp holder ancestry was not detected as omp"
+  assert_not_contains "$out" "OMP_WATCH_EXTENSION: not loaded" "omp diagnostic rejected a current pre-lock loaded marker"
+  pass "session start accepts current omp markers written before lock acquisition"
+}
+
 test_pi_diagnostic_rejects_missing_turnend_guard_marker() {
   local rec root home fakebin out holder_pid
   rec=$(new_world pi-missing-turnend-marker)
@@ -2595,7 +2648,7 @@ test_orphan_status_logs_are_printed
 test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr
 test_composition_invokes_real_scripts
-test_branch_outcome_replay_and_lease_sweep
+test_branch_outcome_replay_respects_captain_barrier_and_lease_sweep
 test_non_pi_session_start_leaves_branch_state_untouched
 test_backlog_compact_tasks_axi_omits_bodies_and_keeps_metadata
 test_backlog_queued_bound_discloses_its_remainder
@@ -2608,6 +2661,8 @@ test_supervision_block_exactly_one_and_pi_diagnostic
 test_pi_signed_primary_uses_pi_extensions_without_identity_normalization
 test_pi_diagnostic_rejects_stale_loaded_marker
 test_pi_diagnostic_accepts_prelock_loaded_marker
+test_omp_supervision_block_and_diagnostic
+test_omp_diagnostic_accepts_prelock_loaded_marker
 test_pi_diagnostic_rejects_missing_turnend_guard_marker
 test_pi_diagnostic_rejects_previous_session_loaded_marker
 test_runtime_bound_truncates_loudly_and_exits_zero

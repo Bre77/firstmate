@@ -228,8 +228,6 @@ install_autoarm_scripts() {
   cp "$ROOT/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-claude-stop-autoarm.sh"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
-  cp "$ROOT/bin/fm-pr-lib.sh" "$dir/bin/fm-pr-lib.sh"
-  cp "$ROOT/bin/fm-check-lib.sh" "$dir/bin/fm-check-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
   cp "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/fm-cursor-lib.sh"
@@ -239,6 +237,8 @@ install_autoarm_scripts() {
   cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 echo "$$" >> "$FM_HOME/state/arm-ran"
+printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+touch "$FM_HOME/state/.last-watcher-beat"
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 printf 'stale: fixture-win actionable\n'
 exit 0

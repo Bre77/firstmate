@@ -12,9 +12,25 @@ Busy hooks verified 2026-07-28 on Claude Code 2.1.220.
 | Skill | `/<skill>`, for example `/no-mistakes`. |
 | Model | `--model <model>`; discover through the interactive `/model` picker, with alias or full-name shape documented by `claude --help`. |
 | Effort | `--effort <low\|medium\|high\|xhigh\|max>`, verified on 2.1.196. |
+| Permissions | `--dangerously-skip-permissions` by default, or `--permission-mode auto` when `config/claude-permission-mode` is `auto`; the `auto` shape verified on 2.1.269, and `../../../../../docs/configuration.md` "Claude permission mode" owns the file. |
 
-Fresh-worktree or first-machine launch may show trust or bypass-permissions confirmation.
-Inspect within about 20 seconds, accept the required choice with `FM_HOME=<active-home> ../../../bin/fm-send.sh <window> --key Enter` unless already bound, and verify instructions started.
+## Workspace trust
+
+Claude gates a folder it has never seen behind an interactive workspace-trust dialog, so every fresh task worktree would hit it.
+`--dangerously-skip-permissions` does not cover that gate: `claude --help` records that the dialog is skipped only in non-interactive mode, through `-p` or a non-TTY stdout, and a crewmate pane is interactive.
+A ship or scout spawn therefore pre-registers the worktree before launch, and the dialog does not appear.
+`../../../bin/fm-claude-trust.sh` records `hasTrustDialogAccepted` for that worktree path in `${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json`, and `../../../bin/fm-spawn.sh` refuses the spawn when the write fails rather than launching a worker that would wedge.
+
+Never try to answer the trust dialog with a key.
+Firstmate's key plane carries only Enter, Escape, and C-c with no arrow navigation, so it cannot move a dialog's selection at all, and the observed rendering starts on `No, exit`, which means a sent Enter ends the session instead of accepting.
+A visible trust dialog means pre-registration did not take effect, so inspect the store and the spawn's error output rather than sending keys.
+
+The once-per-machine bypass-permissions confirmation is a separate dialog, scoped to the machine rather than the path, and pre-registration does not address it.
+Never send Enter to that one either: it was observed rendering in the same shape as the trust dialog, with the selection on `No, exit` and the footer `Enter to confirm . Esc to cancel`, so Enter ends the session rather than accepting.
+Firstmate cannot move a selection with Enter, Escape, and C-c alone, so it cannot accept this dialog at all, and an operator accepts it once per machine instead.
+Inspect the pane to identify which dialog is on screen, and report it rather than answering it.
+A launch under `config/claude-permission-mode=auto` never meets the bypass confirmation, because it does not request bypass mode: on 2.1.269 `claude --permission-mode auto` reached the composer directly with the footer `⏵⏵ auto mode on (shift+tab to cycle)`, so a captain who refuses the bypass dialog selects `auto` there instead of accepting it.
+The workspace-trust dialog is unaffected by the permission mode and still needs the pre-registration above.
 
 ## Composer ghost
 
@@ -26,11 +42,10 @@ As defense in depth, `fm_composer_strip_ghost` in `../../../bin/fm-composer-lib.
 `../../../docs/herdr-backend.md` under "Composer and injection safety" owns dark-TRUECOLOR tradeoffs and `../../../docs/verification/runtime-backends.md` owns captures.
 Styled capture stays internal to the boolean detector; `fm-peek` and model-facing captures remain plain, without escapes.
 
-## Commit co-author trailer
+## Feedback drafts
 
-Verified 2026-07-29 on Claude Code 2.1.220: Claude Code's own git-commit workflow guidance injects a `Co-Authored-By: Claude ... <noreply@anthropic.com>` trailer, which conflicts with the captain's no-agent-co-author convention (`../../../AGENTS.md` section 1).
-The settings schema exposes `attribution.commit` (string; empty string omits the trailer entirely), confirmed both from the installed binary's settings schema and empirically: a real commit drafted by a fresh crewmate-shaped launch (`claude --dangerously-skip-permissions "<prompt>"`, no dictated message) carried the trailer without the flag and omitted it with `--settings '{"attribution":{"commit":""}}'`.
-`../../../bin/fm-spawn.sh` passes that flag on every claude crewmate/secondmate launch, the same per-launch scoping pattern as `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false` above; it never touches the captain's global `~/.claude/settings.json`.
+The spawn disables Claude's `/bug` and `/feedback` model-drafted feedback flow for every Claude worker and secondmate, preventing a fleet-launched agent from queuing or submitting a bug report on the captain's behalf.
+The controls are scoped to the launched process and never modify the captain's global Claude settings; `launch_template()` in `../../../../../bin/fm-spawn.sh` owns their exact mechanics and defense-in-depth rationale.
 
 ## Primary integration
 
