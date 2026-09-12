@@ -113,7 +113,11 @@ out=$(fm_backend_herdr_composer_state "$TARGET")
 pass "real herdr: composer_state keeps real typed text following a REAL ANSI dim-ghost run as pending"
 
 # --- busy_state: real native agent-state round trip via report-agent -------
+# A busy verdict needs a non-shell foreground process: a working registration
+# over a bare shell pane reads as a stale registration, not a live turn.
 
+fm_backend_herdr_send_text_line "$TARGET" 'sleep 5' || fail "could not start a foreground process for the busy_state check"
+sleep 0.5
 fm_herdr_lab_cli "$SESSION" pane report-agent "$PANE_ID" --source fm-composer-live-test --agent claude --state idle >/dev/null 2>&1 \
   || fail "could not register the pane's agent as idle"
 out=$(fm_backend_herdr_busy_state "$TARGET")
@@ -123,6 +127,8 @@ fm_herdr_lab_cli "$SESSION" pane report-agent "$PANE_ID" --source fm-composer-li
 out=$(fm_backend_herdr_busy_state "$TARGET")
 [ "$out" = busy ] || fail "busy_state should read busy after a real report-agent working call, got '$out'"
 pass "real herdr: busy_state reflects a real report-agent idle/working round trip"
+# Let the foreground process exit so the submit checks below type into the shell.
+sleep 5
 
 # --- send_text_submit: confirms via a real agent_status idle->working->idle ---
 # transition (the production confirmation path, docs/herdr-backend.md "Native
