@@ -83,7 +83,14 @@
 #                          the oldest valid row in an endpoint-recorded local
 #                          secondmate home's durable wake queue exceeded
 #                          FM_SECONDMATE_WAKE_STALL_SECS; observation is read-only
-#                          and one parent receipt suppresses repeats for that row
+#                          and one parent receipt suppresses repeats for that row.
+#                          Below FM_SECONDMATE_WAKE_STALL_HARD_SECS, a row whose
+#                          mate shows a live in-turn signal (its own
+#                          state/.watcher-down carries an unacknowledged downtime
+#                          episode AND its recorded endpoint is alive) is treated
+#                          as not stalled instead of alarming, so an ordinary busy
+#                          turn cannot fire this check; past the hard ceiling the
+#                          row always alarms regardless of that signal.
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock.
@@ -215,8 +222,14 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # between completed turns, including long tool calls, builds, or test runs.
 BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
 # A local secondmate's foreign queue is checked on every poll, but only after this
-# bounded age can it produce a parent notification.
-SECONDMATE_WAKE_STALL_SECS=${FM_SECONDMATE_WAKE_STALL_SECS:-60}
+# bounded age can it produce a parent notification. A supervising secondmate
+# running several workers routinely spends several minutes inside one turn,
+# during which its own Stop-owned auto-arm holds its watcher down by design -
+# so the default clears an ordinary busy turn rather than firing on one.
+SECONDMATE_WAKE_STALL_SECS=${FM_SECONDMATE_WAKE_STALL_SECS:-300}
+# Past this age the row alarms regardless of in-turn evidence, so a genuinely
+# wedged mate can never hide behind a downtime marker that never clears.
+SECONDMATE_WAKE_STALL_HARD_SECS=${FM_SECONDMATE_WAKE_STALL_HARD_SECS:-900}
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
 # A captain-held or paused crew whose agent has confidently exited uses the same
@@ -648,14 +661,34 @@ secondmate_oldest_queue_row() {  # <queue-path>
   ' "$queue" 2>/dev/null || true
 }
 
+# True when <home>'s own watcher is down for an in-progress turn (its
+# state/.watcher-down carries an unacknowledged pending:downtime:* or
+# announced:downtime:* episode - fm_recovery_marker_read owns that grammar) AND
+# its recorded endpoint still reads alive via fm_backend_agent_alive. Read-only:
+# never touches the mate's marker or endpoint.
+secondmate_mate_in_turn() {  # <home> <meta>
+  local home=$1 meta=$2 backend target
+  FM_RECOVERY_MARKER_TOKEN=
+  fm_recovery_marker_read "$home/state/.watcher-down" || return 1
+  case "$FM_RECOVERY_MARKER_TOKEN" in
+    pending:downtime:*|announced:downtime:*) ;;
+    *) return 1 ;;
+  esac
+  backend=$(fm_backend_of_meta "$meta")
+  target=$(fm_backend_target_of_meta "$meta")
+  [ -n "$backend" ] && [ -n "$target" ] || return 1
+  [ "$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null)" = alive ]
+}
+
 # Surface one durable parent check for one unchanged foreign row after its
 # bounded age. The primary marker and queued-key check make repeated watcher
 # cycles converge without a notification storm, while an empty queue removes
 # only this home's marker so a later row can be observed.
 secondmate_wake_stall_tick() {
-  local now=$(( $(date +%s) )) threshold=$SECONDMATE_WAKE_STALL_SECS
+  local now=$(( $(date +%s) )) threshold=$SECONDMATE_WAKE_STALL_SECS hard=$SECONDMATE_WAKE_STALL_HARD_SECS
   local meta task kind remote_host home queue row epoch seq row_key marker receipt receipt_dir notify_key queued age reason
   case "$threshold" in ''|*[!0-9]*|0) threshold=60 ;; esac
+  case "$hard" in ''|*[!0-9]*|0) hard=900 ;; esac
   # Endpoint metadata admits this queue-loop check; secondmate-liveness owns registered mates whose endpoint is missing or dead.
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
@@ -689,6 +722,9 @@ EOF
     case "$seq" in ''|*[!0-9]*) continue ;; esac
     age=$((now - epoch))
     [ "$age" -ge "$threshold" ] || continue
+    if [ "$age" -lt "$hard" ] && secondmate_mate_in_turn "$home" "$meta"; then
+      continue
+    fi
     row_key="$epoch-$seq"
     receipt="$receipt_dir/$row_key"
     if [ -e "$marker" ] || [ -L "$marker" ]; then
