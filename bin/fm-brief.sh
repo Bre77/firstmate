@@ -317,6 +317,7 @@ Report only true captain-relevant outcomes or a declared external wait by append
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
 States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
 Use \`$PAUSED_VERB: {why}\` (distinct from \`blocked:\`) only when your domain is deliberately idling on a known external wait you expect to clear on its own; use \`blocked:\` when you are stuck and need firstmate to act.
+Anything waiting on firstmate or the captain - a decision, an approval, a merge word, a credential, an answer - is ALWAYS \`blocked:\`, never \`$PAUSED_VERB:\`, even while you expect the answer soon: e.g. \`blocked: awaiting captain merge decision on fm/foo\`, not \`$PAUSED_VERB: awaiting captain merge decision\`. \`$PAUSED_VERB:\` is only for a wait nobody on our side has to act on, such as \`$PAUSED_VERB: awaiting upstream CI\` or a maintainer review round.
 For a KNOWN timed wait (a deploy verification window, a rate-limit reset, an upstream release), name what you are waiting for and until when before going quiet, e.g. \`$PAUSED_VERB: canary deploy verification until 14:30 UTC\` - generic \`$PAUSED_VERB:\` text alone is easy to misread as a stuck worker.
 Use this only for material phase changes, a captain decision, a real blocker, a failure, work ready for review, or work you landed.
 Work you landed includes a merge you performed yourself under standing merge authority and one the captain merged on the forge: under that authority nothing is ever \"ready for review\", so a landed merge that goes unreported reaches the captain as silence.
@@ -458,6 +459,11 @@ The report is the only thing that survives, so anything worth keeping must be in
    known external wait you expect to clear on its own (an upstream release, a rate-limit reset):
    firstmate then leaves your idle pane alone and rechecks it on a long cadence instead of
    treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
+   Anything waiting on firstmate or the captain - a decision, an approval, a merge word, a
+   credential, an answer - is ALWAYS \`blocked:\`, never \`$PAUSED_VERB:\`: e.g.
+   \`blocked: awaiting captain merge decision on fm/foo\`, not
+   \`$PAUSED_VERB: awaiting captain merge decision\`. \`$PAUSED_VERB:\` is only for a wait nobody on
+   our side has to act on, such as \`$PAUSED_VERB: awaiting upstream CI\` or a maintainer review round.
    For a KNOWN timed wait (a deploy verification window, a rate-limit reset, an upstream release),
    name what you are waiting for and until when before going quiet, e.g.
    \`$PAUSED_VERB: canary deploy verification until 14:30 UTC\` - generic \`$PAUSED_VERB:\` text alone
@@ -593,6 +599,11 @@ $RULE1
    known external wait you expect to clear on its own (an upstream release, a rate-limit reset,
    a scheduled window): firstmate then leaves your idle pane alone and rechecks it on a long
    cadence instead of treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
+   Anything waiting on firstmate or the captain - a decision, an approval, a merge word, a
+   credential, an answer - is ALWAYS \`blocked:\`, never \`$PAUSED_VERB:\`, even while you expect the
+   answer soon: e.g. \`blocked: awaiting captain merge decision on fm/foo\`, not
+   \`$PAUSED_VERB: awaiting captain merge decision\`. \`$PAUSED_VERB:\` is only for a wait nobody on
+   our side has to act on, such as \`$PAUSED_VERB: awaiting upstream CI\` or a maintainer review round.
    For a KNOWN timed wait (a deploy verification window, a rate-limit reset, an upstream release),
    name what you are waiting for and until when before going quiet, e.g.
    \`$PAUSED_VERB: canary deploy verification until 14:30 UTC\` - generic \`$PAUSED_VERB:\` text alone

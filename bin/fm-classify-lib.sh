@@ -90,6 +90,23 @@ FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|
 # drift between the two consumers. FM_CLASSIFY_PAUSED_VERB overrides it.
 FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 
+# A paused: note that names firstmate or the captain as what it is waiting on -
+# a decision, an approval, a merge word, a credential, an answer - is not a
+# genuine external wait: AGENTS.md section 8 defines paused as bounded and
+# EXTERNAL, clearing on its own, while anything waiting on firstmate or the
+# captain is blocked. A crew that mislabels such a wait as paused would
+# otherwise sit on the long FM_PAUSE_RESURFACE_SECS recheck cadence instead of
+# surfacing immediately. This is a small explicit word list, not a broad
+# regex, so widening what counts as "waiting on us" is a deliberate edit here
+# rather than an accidental prose overlap with a genuinely external wait (for
+# example "paused: awaiting upstream CI" must never match). "merge decision" is
+# stated as a phrase rather than the bare word "merge" because a bare "merge"
+# also matches "merged" - ordinary past-tense prose reporting an unrelated PR
+# state ("waiting for upstream checks green, merged, and blocked state to
+# clear"), never a real wait on us. FM_CLASSIFY_PAUSED_ON_CAPTAIN_RE overrides
+# the list; absent, this default applies.
+FM_CLASSIFY_PAUSED_ON_CAPTAIN_RE_DEFAULT='captain|firstmate|merge decision|approv|decision|your call'
+
 # Bounded re-surface cadence for a declared pause or a verified captain hold.
 # Far longer than the wedge threshold (FM_STALE_ESCALATE_SECS, default 240s), it
 # avoids nagging a deliberate wait while ensuring a forgotten hold cannot rot
@@ -134,7 +151,10 @@ status_is_terminal_verb() {
 status_is_captain_relevant() {
   local line=$1 verb
   [ -n "$line" ] || return 1
-  status_is_paused "$line" && return 1
+  if status_is_paused "$line"; then
+    status_is_paused_on_captain "$line" && return 0
+    return 1
+  fi
   verb=$(status_line_verb "$line")
   case "$verb" in
     working|resolved|captain-held|"${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}")
@@ -160,6 +180,21 @@ status_is_paused() {  # <status-line>
   [ "$verb" = "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" ]
 }
 
+# 0 if a paused: line's note names firstmate or the captain as what it is
+# waiting on, per FM_CLASSIFY_PAUSED_ON_CAPTAIN_RE above. A pure text match on
+# the note (status_line_note), never the verb, so a line whose verb is not
+# paused never matches here regardless of its prose. Callers treat such a line
+# as blocked rather than a genuine external pause: status_is_captain_relevant
+# surfaces it immediately, and status_is_paused_or_captain_held withholds the
+# declared-wait absorb cadence from it so it gets the ordinary blocked
+# treatment instead.
+status_is_paused_on_captain() {  # <status-line>
+  local line=$1
+  status_is_paused "$line" || return 1
+  printf '%s' "$(status_line_note "$line")" \
+    | grep -qiE "${FM_CLASSIFY_PAUSED_ON_CAPTAIN_RE:-$FM_CLASSIFY_PAUSED_ON_CAPTAIN_RE_DEFAULT}"
+}
+
 # 0 if a status line's leading verb is the verified captain-held transfer verb.
 # The same pure verb read as status_is_paused, and the discriminator a supervisor
 # needs once a declared wait has already been recognized: the two declarations get
@@ -173,16 +208,24 @@ status_is_captain_held() {  # <status-line>
   [ "$verb" = "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}" ]
 }
 
-# 0 if a status line declares either an external-wait pause or a verified
-# captain-held transfer.
+# 0 if a status line declares either a genuine external-wait pause or a
+# verified captain-held transfer.
 # Both declarations can intentionally leave a crew's endpoint idle, so both
 # supervisors give them one cadence: the away-mode daemon defers the wedge and
 # ages a pause marker instead, and the watcher applies its bounded pause cadence
 # once pause_state_class has admitted the wait (fm-watch.sh owns which liveness
-# evidence each kind of crew must supply for that).
+# evidence each kind of crew must supply for that). A paused: line whose note
+# names firstmate or the captain (status_is_paused_on_captain) is excluded here
+# even though its verb is paused: it is a mislabeled blocked wait, so it falls
+# through to ordinary blocked-cadence handling instead of the long pause
+# recheck.
 status_is_paused_or_captain_held() {  # <status-line>
   local line=$1
-  status_is_paused "$line" || status_is_captain_held "$line"
+  if status_is_paused "$line"; then
+    ! status_is_paused_on_captain "$line"
+    return
+  fi
+  status_is_captain_held "$line"
 }
 
 # --- durable keyed decisions ------------------------------------------------
