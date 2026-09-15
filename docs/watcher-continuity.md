@@ -22,6 +22,14 @@ Only an exhausted failure with no verified watcher commits one last-resort notic
 The Claude turn-end guard owns that notice commit contract, the monotonic failure progression, one-time attended fail-open, post-alarm continuation suppression, and positive recovery reset described in [`turnend-guard.md`](turnend-guard.md#harness-integrations).
 While supervision is still needed and away mode remains inactive, an actionable close wakes the idle session through exit 2.
 
+A hook-owned cycle has a lifetime cap, because Claude and Cursor each kill a hook's whole process tree at its registered 28800-second timeout and deliver nothing, so an uncapped quiet home would stay deaf until the next captain message.
+Both hooks therefore pass their arm one absolute `FM_WATCH_CYCLE_DEADLINE` from `fm_hook_cycle_deadline` in `bin/fm-wake-lib.sh`, set below that timeout and shared by every retry of the firing.
+A watcher started under that deadline closes before its next poll wait would cross it, with one durable `check: cycle-renewal` wake that states no fleet event occurred; any real wake in that poll exits first.
+The hook delivers that close like any other actionable wake, so the handling turn drains and acknowledges it and the next turn end arms a fresh cycle under a fresh deadline.
+The hook stays the single arm owner, no watcher outlives its hook, and no replacement is started with shell `&`.
+The deadline binds only a watcher the hook's own arm starts, because an attached arm follows a cycle that some other owner started and keeps alive.
+Every other primary integration has no hook-owned cycle to cap: the Pi, omp, and OpenCode extensions spawn their arm in-process with no lifetime timeout, Codex's checkpoint is bounded by design and its `Stop` hook only runs the guard, Grok's arm is a tracked background task and its `Stop` hook only runs the guard, and Kimi has no project-level primary hook.
+
 ## Actionable wake ordering
 
 After an actionable Pi, omp, or OpenCode child close, the adapter starts and verifies one singleton successor before it delivers the original wake.
@@ -127,6 +135,8 @@ The same suite covers ordinary same-process session replacement for `/new`, `/re
 `tests/fm-subagent-pretool-check.test.sh` proves Claude retains only the non-status Bash seatbelts.
 `tests/fm-claude-stop-autoarm.test.sh` covers the auto-arm's scope, stale and live session owners, unchanged AFK and need boundaries, single-flight, bounded failure retries, benign live-watcher cycle ends, one-notice failure episodes, and exit-2 translation.
 It also covers generation-claim single-flight, stuck-claim supersession, superseded-owner silence, notice-marker refusal and retry, ownership-atomic episode reset, and the legacy upgrade shim; [`turnend-guard.md`](turnend-guard.md) owns those behavior contracts.
+Its cap-boundary cases run the real hook, arm, watcher, and drain under a stand-in session that signals the hook's process group at a shortened timeout: without a reachable deadline the cycle dies with nothing delivered, and with one each cycle renews before the timeout, the next Stop re-arms without reopening a recovery episode, and a Stop fired mid-cycle defers while exactly one watcher runs.
+`tests/fm-cursor-primary.test.sh` proves the parked cycle's deadline falls before the tracked stop timeout and that a quiet real cycle renews through one follow-up.
 `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` starts with the reproduced stale-lock state, runs session start first, completes two tokenless cycles, and checks the competing-live-owner negative control.
 `tests/fm-turnend-guard.test.sh` covers the cooperative `--claude` guard, including monotonic failed-epoch progression, the integrated bounded fail-open, post-alarm continuation suppression, and positive recovery reset; [`turnend-guard.md`](turnend-guard.md#regression-coverage) lists that suite's full generation and legacy claim coverage.
 
@@ -134,7 +144,8 @@ It also covers generation-claim single-flight, stuck-claim supersession, superse
 
 The goal is continuity without a Pi, omp, or OpenCode model-memory re-arm step.
 No zero-latency guarantee is claimed because lock verification, watcher startup, and bounded retry delays remain deliberate safety work.
+A quiet Claude or Cursor primary spends one short handling turn per hook-timeout window on cycle renewal.
 OpenCode support targets persistent TUI sessions rather than headless `opencode run`.
 Claude depends on the Stop `asyncRewake` rewake, Cursor depends on its awaited stop-hook park, Grok retains native background-completion notifications, and Codex retains bounded foreground checkpoints.
 
-[`verification/supervision.md`](verification/supervision.md#watcher-continuity) records the current five-harness live evidence, the 2026-07-24 Stop-owned Claude auto-arm results, and exact opt-in commands.
+[`verification/supervision.md`](verification/supervision.md#watcher-continuity) records the current five-harness live evidence, the 2026-07-24 Stop-owned Claude auto-arm results, the hook-owned cycle deadline evidence, and exact opt-in commands.

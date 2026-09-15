@@ -99,6 +99,10 @@
 #                          running a check or removing poll artifacts
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
+#   check: cycle-renewal (...)
+#                          a hook-owned cycle reached FM_WATCH_CYCLE_DEADLINE with
+#                          no fleet event; its hook delivers this one wake so the
+#                          next turn end re-arms before the hook timeout kills it
 #   check: inactive-outcome bounded poll-loop reconciliation found a suspicious
 #                          inactive terminal outcome that still lacks its durable
 #                          upstream receipt
@@ -1908,6 +1912,14 @@ printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
 
+# A hook-owned cycle must close before its harness hook timeout kills it with
+# nothing delivered (fm_hook_cycle_deadline); unset so no child inherits it.
+CYCLE_DEADLINE=${FM_WATCH_CYCLE_DEADLINE:-}
+case "$CYCLE_DEADLINE" in *[!0-9]*) CYCLE_DEADLINE= ;; esac
+unset FM_WATCH_CYCLE_DEADLINE
+CYCLE_RENEW_LEAD=$POLL
+case "$CYCLE_RENEW_LEAD" in ''|*[!0-9]*) CYCLE_RENEW_LEAD=15 ;; esac
+
 # A merged poll may have queued its terminal wake and then lost the process
 # between receipt publication and fixed-path removal.
 # Finish only identity-bound retirement receipts before any check can run.
@@ -2493,6 +2505,15 @@ EOF
       echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak"
       triage_log "absorbed heartbeat (no captain-relevant change)"
     fi
+  fi
+
+  # Renew before the next wait could cross the hook deadline. Any real wake this
+  # cycle already exited above, so a renewal never masks one.
+  if [ -n "$CYCLE_DEADLINE" ] \
+    && [ $(( $(date +%s) + CYCLE_RENEW_LEAD )) -ge "$CYCLE_DEADLINE" ]; then
+    reason="check: cycle-renewal (hook timeout approaching, no fleet event: drain, acknowledge, and end the turn so the next turn end re-arms)"
+    fm_wake_append check cycle-renewal "$reason" || exit 1
+    wake "$reason"
   fi
 
   # Terminal wait: a bounded native-event wait for push-capable homes (herdr),

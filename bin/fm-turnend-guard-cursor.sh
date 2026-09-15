@@ -301,15 +301,18 @@ STAND_DOWN=0
 # Never leave an arm child or its capture file behind, on any exit path.
 trap '[ -n "$ARM_PID" ] && kill "$ARM_PID" 2>/dev/null; [ -n "$ARM_OUT" ] && rm -f "$ARM_OUT" 2>/dev/null; :' EXIT
 
+# Cursor kills this hook at its registered timeout and delivers nothing, so the
+# parked cycle closes itself before then with a benign renewal wake.
+CYCLE_DEADLINE=$(fm_hook_cycle_deadline)
 attempt=0
 while [ "$attempt" -lt "$ARM_ATTEMPTS" ]; do
   current_session_still_ours || exit 0
   attempt=$((attempt + 1))
   ARM_OUT=$(mktemp "$STATE/.cursor-park-output.XXXXXX") || ARM_OUT=
   if [ -n "$ARM_OUT" ]; then
-    "$SCRIPT_DIR/fm-watch-arm.sh" >"$ARM_OUT" 2>&1 &
+    FM_WATCH_CYCLE_DEADLINE="$CYCLE_DEADLINE" "$SCRIPT_DIR/fm-watch-arm.sh" >"$ARM_OUT" 2>&1 &
   else
-    "$SCRIPT_DIR/fm-watch-arm.sh" >/dev/null 2>&1 &
+    FM_WATCH_CYCLE_DEADLINE="$CYCLE_DEADLINE" "$SCRIPT_DIR/fm-watch-arm.sh" >/dev/null 2>&1 &
   fi
   ARM_PID=$!
   while kill -0 "$ARM_PID" 2>/dev/null; do

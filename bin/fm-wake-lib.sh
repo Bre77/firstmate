@@ -123,6 +123,16 @@ fm_poll_derived_grace() {
   printf '%s\n' "$derived"
 }
 
+# fm_hook_cycle_deadline: epoch by which a hook-foregrounded watcher cycle must
+# close itself. The harness kills the hook's process tree at its registered
+# timeout (28800s for Claude Stop and Cursor stop) and delivers nothing, so
+# FM_HOOK_CYCLE_CAP must stay below that timeout.
+fm_hook_cycle_deadline() {
+  local cap=${FM_HOOK_CYCLE_CAP:-27900}
+  case "$cap" in ''|*[!0-9]*|0) cap=27900 ;; esac
+  printf '%s\n' "$(( $(date +%s) + cap ))"
+}
+
 # fm_watcher_lock_unheld <state>
 # True when the watcher lock or its symlinked owner directory is absent, or when
 # the existing lock records no pid at all. Any non-empty pid remains held here;
