@@ -501,6 +501,29 @@ ok - unacknowledged recovery is announced at most once per generation and the su
 FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=59357
 ```
 
+The hook-owned cycle deadline was verified on 2026-09-16 with ShellCheck 0.11.0, real hook, arm, watcher, and drain processes, and an isolated home.
+The harness's 28800-second hook-timeout kill is emulated by signalling the hook's process group at a shortened timeout; no live Claude or Cursor session was held past a real timeout.
+The renewal case fails against a watcher without the deadline, and the counterfactual case proves the emulated timeout kills an undeadlined cycle with nothing delivered.
+
+```sh
+bin/fm-lint.sh
+bin/fm-doc-audience-check.sh
+bin/fm-test-run.sh tests/fm-claude-stop-autoarm.test.sh tests/fm-cursor-primary.test.sh
+```
+
+Observed output:
+
+```text
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+fm-doc-audience-check: ok surfaces=108 local_links=393
+ok - cursor park: the parked cycle's deadline falls before the tracked stop hook timeout
+ok - cursor park: a quiet real cycle renews through one follow-up before the stop hook timeout
+ok - auto-arm: the armed cycle's deadline falls before the tracked Stop hook timeout
+ok - auto-arm: without a cycle deadline the hook timeout kills supervision with nothing delivered
+ok - auto-arm: each cycle renews before the hook timeout, the next Stop re-arms, and one owner holds supervision
+FM_TEST_SUMMARY total=2 failed=0 skipped_gate=0 duration_ms=100851
+```
+
 Deterministic entry points:
 
 ```sh
