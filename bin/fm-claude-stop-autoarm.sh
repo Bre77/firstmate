@@ -35,6 +35,9 @@
 #   - Foreground arm: the owner runs bin/fm-watch-arm.sh in the FOREGROUND of
 #     this hook-owned process tree (never shell &); Claude owns the process
 #     group, so its timeout/session teardown kills arm and watcher together.
+#     The started watcher therefore carries a deadline (fm_hook_cycle_deadline)
+#     below the registered timeout and closes with a benign cycle-renewal wake,
+#     which this hook translates like any other so the next Stop re-arms.
 #   - Translation: while supervision is still needed and AFK remains inactive,
 #     an actionable arm close (signal:/stale:/check:/heartbeat) prints one
 #     rewake banner to stderr and exits 2, which wakes Claude even while idle
@@ -223,6 +226,9 @@ OUT=
 ACTIONABLE=0
 HEALTHY=0
 attempt=0
+# One absolute deadline for every attempt: the harness timeout counts from this
+# firing, not from each retry.
+CYCLE_DEADLINE=$(fm_hook_cycle_deadline)
 while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
   # A superseded owner must not start or attach another watcher or mutate any
   # watcher/wake state: re-verify generation ownership before every arm
@@ -234,9 +240,11 @@ while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
   attempt=$((attempt + 1))
   OUT=$(mktemp "$STATE/.claude-autoarm-output.XXXXXX") || OUT=
   if [ -n "$OUT" ]; then
-    FM_GUARD_GRACE="$GRACE" "$SCRIPT_DIR/fm-watch-arm.sh" >"$OUT" 2>&1 || true
+    FM_GUARD_GRACE="$GRACE" FM_WATCH_CYCLE_DEADLINE="$CYCLE_DEADLINE" \
+      "$SCRIPT_DIR/fm-watch-arm.sh" >"$OUT" 2>&1 || true
   else
-    FM_GUARD_GRACE="$GRACE" "$SCRIPT_DIR/fm-watch-arm.sh" >/dev/null 2>&1 || true
+    FM_GUARD_GRACE="$GRACE" FM_WATCH_CYCLE_DEADLINE="$CYCLE_DEADLINE" \
+      "$SCRIPT_DIR/fm-watch-arm.sh" >/dev/null 2>&1 || true
   fi
 
   # AFK may have appeared mid-cycle: the daemon owns triage now, so suppress

@@ -195,6 +195,15 @@ printf 'watcher: attached pid=%s (beacon 2s)\n' "$$"
 exit 0
 SH
       ;;
+    records-deadline)
+      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+echo "$$" >> "$FM_HOME/state/arm-ran"
+printf '%s\n' "${FM_WATCH_CYCLE_DEADLINE:-unset}" > "$FM_HOME/state/arm-received-deadline"
+printf 'watcher: attached pid=%s (beacon 2s)\n' "$$"
+exit 0
+SH
+      ;;
     *)
       echo "unknown arm fixture: $kind" >&2
       return 2
@@ -1191,6 +1200,167 @@ test_long_poll_grace_reaches_arm_wrapper() {
   pass "auto-arm: a long FM_POLL with FM_GUARD_GRACE unset reaches fm-watch-arm.sh with the derived grace"
 }
 
+test_arm_receives_cycle_deadline_below_registered_timeout() {
+  local dir out status timeout deadline started
+  dir=$(make_primary_dir "$TMP_ROOT/cycle-deadline")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" records-deadline
+  timeout=$(jq -r '.hooks.Stop[].hooks[] | select(.command | contains("fm-claude-stop-autoarm.sh")) | .timeout' \
+    "$ROOT/.claude/settings.json")
+  case "$timeout" in ''|*[!0-9]*) fail "tracked Stop auto-arm registration has no numeric timeout: $timeout" ;; esac
+  started=$(date +%s)
+  out=$(unset FM_HOOK_CYCLE_CAP; run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "the recording fixture closes unverified, so the hook must still fail closed"
+  deadline=$(cat "$dir/state/arm-received-deadline" 2>/dev/null || true)
+  case "$deadline" in ''|*[!0-9]*) fail "arm wrapper never received a numeric FM_WATCH_CYCLE_DEADLINE: $deadline" ;; esac
+  [ "$deadline" -gt "$started" ] || fail "cycle deadline $deadline is not in the future of $started"
+  [ "$deadline" -lt $((started + timeout)) ] \
+    || fail "cycle deadline $deadline does not close before the registered ${timeout}s Stop hook timeout"
+  pass "auto-arm: the armed cycle's deadline falls before the tracked Stop hook timeout"
+}
+
+# Stand-in Claude session for the cap-boundary cases. It owns the home lock and
+# fires the real Stop hook the way Claude runs an asyncRewake hook: in its own
+# process group, which is signalled whole at the registered timeout <limit>.
+# With <overlap-tag> it fires a second Stop while the first cycle is live.
+write_cap_harness() {  # <dir>
+  cat > "$1/cap-harness.sh" <<'SH'
+set -u
+limit=$1 tag=$2 overlap=${3:-}
+home=$FM_HOME
+printf '%s\n' "$$" > "$home/state/.lock"
+set -m
+"$home/bin/fm-claude-stop-autoarm.sh" < "$home/stop-payload.json" > "$home/$tag.out" 2>&1 &
+hook=$!
+( sleep "$limit"; kill -TERM -- "-$hook" 2>/dev/null && : > "$home/$tag.timed-out" ) &
+killer=$!
+set +m
+if [ -n "$overlap" ]; then
+  i=0
+  until wpid=$(cat "$home/state/.watch.lock/pid" 2>/dev/null) && [ -n "$wpid" ] && kill -0 "$wpid" 2>/dev/null; do
+    i=$((i + 1))
+    [ "$i" -lt 150 ] || break
+    sleep 0.1
+  done
+  printf '%s\n' "${wpid:-none}" > "$home/$overlap.watcher-before"
+  "$home/bin/fm-claude-stop-autoarm.sh" < "$home/stop-payload.json" > "$home/$overlap.out" 2>&1
+  printf '%s\n' "$?" > "$home/$overlap.rc"
+  cat "$home/state/.watch.lock/pid" > "$home/$overlap.watcher-after" 2>/dev/null
+  n=0
+  for p in $(pgrep -f -- "$home/bin/fm-watch.sh" 2>/dev/null); do
+    # Skip the watcher's own transient subshells, including ones already gone.
+    parent=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
+    [ -n "$parent" ] || continue
+    ps -o args= -p "$parent" 2>/dev/null | grep -qF -- "$home/bin/fm-watch.sh" && continue
+    kill -0 "$p" 2>/dev/null || continue
+    n=$((n + 1))
+    ps -o pid=,ppid=,stat=,args= -p "$p" >> "$home/$overlap.watchers-seen" 2>/dev/null
+  done
+  printf '%s\n' "$n" > "$home/$overlap.watchers"
+fi
+wait "$hook"
+printf '%s\n' "$?" > "$home/$tag.rc"
+kill -0 -- "-$hook" 2>/dev/null && : > "$home/$tag.leftover"
+kill -TERM -- "-$killer" 2>/dev/null
+wait "$killer" 2>/dev/null
+exit 0
+SH
+  printf '%s\n' '{"session_id":"sess-autoarm","stop_hook_active":false}' > "$1/stop-payload.json"
+}
+
+# A primary running the REAL arm wrapper and watcher, with an in-flight task and
+# no pane to scan, so the only thing that can close a quiet cycle is its deadline.
+make_real_watch_primary_dir() {
+  local dir=$1
+  make_primary_dir "$dir" >/dev/null
+  cp -R "$ROOT/bin/." "$dir/bin/"
+  printf 'project=fixture\n' > "$dir/state/task.meta"
+  write_cap_harness "$dir"
+  printf '%s\n' "$dir"
+}
+
+run_cap_harness() {  # <dir> <cycle-cap> <limit> <tag> [overlap-tag]
+  local dir=$1 cap=$2
+  shift 2
+  env -u FM_STATE_OVERRIDE -u FM_ROOT_OVERRIDE -u FM_GUARD_GRACE \
+    FM_HOME="$dir" FM_HOOK_CYCLE_CAP="$cap" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_HOME_SUMMARY_INTERVAL=999999 \
+    "$FAKE_CLAUDE" "$dir/cap-harness.sh" "$@" >/dev/null 2>&1
+}
+
+queue_has_renewal() {  # <dir>
+  awk -F '\t' '$3 == "check" && $4 == "cycle-renewal" { found = 1 } END { exit !found }' \
+    "$1/state/.wake-queue" 2>/dev/null
+}
+
+drain_and_ack_home() {  # <dir>
+  local dir=$1 err sequence generation
+  err="$dir/drain.err"
+  FM_HOME="$dir" "$dir/bin/fm-wake-drain.sh" >/dev/null 2> "$err" || return 1
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+  [ -n "$sequence" ] && [ -n "$generation" ] || return 1
+  FM_HOME="$dir" "$dir/bin/fm-wake-drain.sh" --ack-through "$sequence" \
+    --recovery-generation "$generation" >/dev/null 2>&1
+}
+
+# The 2026-09-13 lapse: a quiet hold outlived the Stop hook's registered timeout,
+# Claude killed the hook's process tree with the watcher inside it, and nothing
+# re-armed until the next captain message. The counterfactual pins that the
+# emulated timeout really kills an undeadlined cycle with nothing delivered, so
+# the fixed case below cannot pass vacuously.
+test_cycle_without_deadline_dies_undelivered_at_hook_timeout() {
+  local dir status i
+  dir=$(make_real_watch_primary_dir "$TMP_ROOT/cap-counterfactual")
+  run_cap_harness "$dir" 3600 6 capped
+  status=$(cat "$dir/capped.rc" 2>/dev/null || true)
+  [ -e "$dir/capped.timed-out" ] || fail "the emulated hook timeout never fired; the counterfactual is vacuous (rc=$status)"
+  [ "$status" != 2 ] || fail "a hook killed at its timeout must not deliver a rewake"
+  assert_not_contains "$(cat "$dir/capped.out")" "cycle-renewal" "a cycle with no reachable deadline must not renew"
+  ! queue_has_renewal "$dir" || fail "a cycle with no reachable deadline queued a renewal"
+  # The signalled watcher finishes its current poll sleep before its trap runs.
+  i=0
+  while FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_watcher_healthy "$2" "$3" 300 "$4"' _ \
+    "$dir/bin/fm-wake-lib.sh" "$dir/state" "$dir/bin/fm-watch.sh" "$dir"; do
+    i=$((i + 1))
+    [ "$i" -lt 50 ] || fail "the watcher outlived its hook's process group"
+    sleep 0.1
+  done
+  pass "auto-arm: without a cycle deadline the hook timeout kills supervision with nothing delivered"
+}
+
+test_cycle_renews_before_hook_timeout_with_one_owner() {
+  local dir status out
+  dir=$(make_real_watch_primary_dir "$TMP_ROOT/cap-renewal")
+
+  run_cap_harness "$dir" 3 20 first
+  status=$(cat "$dir/first.rc" 2>/dev/null || true)
+  out=$(cat "$dir/first.out" 2>/dev/null || true)
+  [ ! -e "$dir/first.timed-out" ] || fail "the cycle was still running at the hook timeout: $out"
+  expect_code 2 "$status" "a cycle reaching its deadline must close through one exit-2 rewake"
+  assert_contains "$out" "check: cycle-renewal" "the rewake must carry the benign renewal reason"
+  [ ! -e "$dir/first.leftover" ] || fail "the renewed cycle left a process in the hook's group"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "renewal must commit as an ordinary rewake, got: $(epoch_outcome "$dir")"
+  queue_has_renewal "$dir" || fail "the renewal must be a durable queued wake"
+  drain_and_ack_home "$dir" || fail "the renewal wake could not be drained and acknowledged"
+
+  run_cap_harness "$dir" 8 30 second overlap
+  status=$(cat "$dir/second.rc" 2>/dev/null || true)
+  out=$(cat "$dir/second.out" 2>/dev/null || true)
+  [ "$(cat "$dir/overlap.watcher-before")" != none ] || fail "the next Stop never re-armed a live watcher"
+  expect_code 0 "$(cat "$dir/overlap.rc")" "a Stop fired during a live cycle must defer to its owner"
+  [ -z "$(cat "$dir/overlap.out")" ] || fail "the deferring Stop produced output: $(cat "$dir/overlap.out")"
+  [ "$(cat "$dir/overlap.watcher-after")" = "$(cat "$dir/overlap.watcher-before")" ] \
+    || fail "the deferring Stop replaced the live watcher"
+  [ "$(cat "$dir/overlap.watchers")" = 1 ] \
+    || fail "expected exactly one live watcher, saw: $(cat "$dir/overlap.watchers-seen" 2>/dev/null)"
+  [ ! -e "$dir/second.timed-out" ] || fail "the re-armed cycle was still running at the hook timeout: $out"
+  expect_code 2 "$status" "the re-armed cycle must renew again before its own hook timeout"
+  assert_contains "$out" "check: cycle-renewal" "the second cap must also close as a renewal"
+  assert_not_contains "$out" "rearm-resurface" "an acknowledged renewal must not reopen a recovery episode"
+  pass "auto-arm: each cycle renews before the hook timeout, the next Stop re-arms, and one owner holds supervision"
+}
+
 test_fm_lock_status_still_works_with_shared_lib() {
   local out
   out=$(FM_HOME="$TMP_ROOT/lock-status-home" bash "$ROOT/bin/fm-lock.sh" status 2>&1)
@@ -1238,4 +1408,7 @@ test_need_vanished_mid_cycle_closes_quietly
 test_afk_mid_cycle_suppresses_rewake
 test_active_in_marked_secondmate_home
 test_long_poll_grace_reaches_arm_wrapper
+test_arm_receives_cycle_deadline_below_registered_timeout
+test_cycle_without_deadline_dies_undelivered_at_hook_timeout
+test_cycle_renews_before_hook_timeout_with_one_owner
 test_fm_lock_status_still_works_with_shared_lib

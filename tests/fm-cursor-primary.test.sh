@@ -115,6 +115,15 @@ printf 'watcher: FAILED - no live watcher with a fresh beacon\n'
 exit 1
 SH
       ;;
+    records-deadline)
+      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$$" >> "$FM_HOME/state/arm-ran"
+printf '%s\n' "${FM_WATCH_CYCLE_DEADLINE:-unset}" > "$FM_HOME/state/arm-received-deadline"
+printf 'stale: fixture-win needs a look\n'
+exit 0
+SH
+      ;;
     switchable)
       # Slow until state/arm-fast appears, so a second invocation can be made
       # fast WITHOUT rewriting a script the first one is still executing.
@@ -289,6 +298,54 @@ test_park_delivers_actionable_wake_as_followup() {
   case "$body" in *'stale: fixture-win needs a look'*) ;; *) fail "the wake reason was not carried into the follow-up: $body" ;; esac
   case "$body" in *'fm-wake-drain.sh'*) ;; *) fail "the follow-up must tell the session to drain first: $body" ;; esac
   pass "cursor park: an actionable close is delivered as one watcher-kind follow-up"
+}
+
+test_park_cycle_deadline_precedes_registered_stop_timeout() {
+  local dir timeout started deadline
+  dir=$(make_primary_dir "$TMP_ROOT/park-deadline")
+  : > "$dir/state/task1.meta"
+  write_arm_fixture "$dir" records-deadline
+  timeout=$(jq -r '.hooks.stop[0].timeout' "$ROOT/.cursor/hooks.json")
+  case "$timeout" in ''|*[!0-9]*) fail "the stop registration needs a numeric timeout, got: $timeout" ;; esac
+  started=$(date +%s)
+  (unset FM_HOOK_CYCLE_CAP; run_park "$dir" >/dev/null)
+  deadline=$(cat "$dir/state/arm-received-deadline" 2>/dev/null || true)
+  case "$deadline" in ''|*[!0-9]*) fail "the parked arm never received a numeric FM_WATCH_CYCLE_DEADLINE: $deadline" ;; esac
+  [ "$deadline" -gt "$started" ] || fail "cycle deadline $deadline is not in the future of $started"
+  [ "$deadline" -lt $((started + timeout)) ] \
+    || fail "cycle deadline $deadline does not close before the registered ${timeout}s stop hook timeout"
+  pass "cursor park: the parked cycle's deadline falls before the tracked stop hook timeout"
+}
+
+# Cursor awaits the park and kills it at the registered stop timeout with no
+# follow-up, so a quiet cycle must close itself first. The REAL arm and watcher
+# run here with an in-flight task and no pane, so only the deadline can end it.
+test_park_real_cycle_renews_before_stop_timeout() {
+  local dir out park i
+  dir=$(make_primary_dir "$TMP_ROOT/park-renewal")
+  cp -R "$ROOT/bin/." "$dir/bin/"
+  printf 'project=fixture\n' > "$dir/state/task1.meta"
+  (
+    unset FM_STATE_OVERRIDE FM_ROOT_OVERRIDE FM_GUARD_GRACE
+    FM_HOOK_CYCLE_CAP=3 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
+      FM_HEARTBEAT=999999 FM_HOME_SUMMARY_INTERVAL=999999 run_park "$dir"
+  ) > "$dir/park.out" &
+  park=$!
+  i=0
+  while kill -0 "$park" 2>/dev/null; do
+    i=$((i + 1))
+    if [ "$i" -ge 300 ]; then
+      kill "$park" 2>/dev/null
+      fail "the parked cycle never closed itself before its deadline"
+    fi
+    sleep 0.1
+  done
+  wait "$park" 2>/dev/null
+  out=$(cat "$dir/park.out")
+  [ "$(kind_of_followup "$out")" = watcher ] \
+    || fail "a renewal must arrive as a watcher-kind follow-up so the next stop parks again, got: $out"
+  case "$(followup_of "$out")" in *'check: cycle-renewal'*) ;; *) fail "the follow-up did not carry the renewal reason: $out" ;; esac
+  pass "cursor park: a quiet real cycle renews through one follow-up before the stop hook timeout"
 }
 
 test_park_never_exits_two() {
@@ -686,6 +743,8 @@ test_pretool_guards_deduplicate_and_render_cursor_deny
 test_cd_guard_renders_cursor_deny
 test_park_silent_when_nothing_in_flight
 test_park_delivers_actionable_wake_as_followup
+test_park_cycle_deadline_precedes_registered_stop_timeout
+test_park_real_cycle_renews_before_stop_timeout
 test_park_never_exits_two
 test_park_repair_nag_is_bounded
 test_park_repair_nag_requires_a_persisted_budget
